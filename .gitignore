@@ -4,3 +4,4 @@ node_modules/
 scene.glb
 # Photos personnelles : le repo est public, elles restent en local + bucket privé
 fixtures/
+tests/
