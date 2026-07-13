@@ -43,6 +43,32 @@ CKPT_DIR = VOLUME / "genrecon"
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
 
 
+# load_train_config() attend une arborescence de run d'entraînement
+# (<run>/ckpts/model.pt + <run>/config.json) ; le serveur TUM ne fournit que
+# les .pt. On reconstruit le layout avec des symlinks + les configs du repo.
+_STAGES = {
+    "ss": ("sparse_structure.pt", "configs/gen/ss_flow_img/genrecon.json"),
+    "shape": ("shape_slat.pt", "configs/gen/slat_flow_img2shape/genrecon_512.json"),
+    "tex": ("texture_slat.pt", "configs/gen/slat_flow_imgshape2tex/genrecon_512.json"),
+}
+
+
+def _ckpt_layout():
+    root = Path("/tmp/ckpt_layout")
+    shutil.rmtree(root, ignore_errors=True)
+    paths = {}
+    for stage, (ckpt_name, config_rel) in _STAGES.items():
+        src = CKPT_DIR / ckpt_name
+        if not src.exists():
+            raise RuntimeError(f"Checkpoint manquant sur le volume : {src}")
+        run_dir = root / stage
+        (run_dir / "ckpts").mkdir(parents=True)
+        (run_dir / "ckpts" / ckpt_name).symlink_to(src)
+        shutil.copy(GENRECON / config_rel, run_dir / "config.json")
+        paths[stage] = run_dir / "ckpts" / ckpt_name
+    return paths
+
+
 def _sb():
     return create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_SECRET_KEY"])
 
@@ -112,9 +138,7 @@ def handler(job):
     num_imgs = int(inp.get("num_imgs_per_scene", 999))
     proj_batch_voxels = int(inp.get("proj_batch_voxels", 2048))
 
-    for ckpt in ("sparse_structure.pt", "shape_slat.pt", "texture_slat.pt"):
-        if not (CKPT_DIR / ckpt).exists():
-            raise RuntimeError(f"Checkpoint manquant sur le volume : {CKPT_DIR / ckpt}")
+    ckpts = _ckpt_layout()
 
     scene = Path("/tmp/scene")
     shutil.rmtree(scene, ignore_errors=True)
@@ -147,9 +171,9 @@ def handler(job):
                 "--path", scene,
                 "--output_path", out_dir,
                 "--colmap_subdir", "colmap",
-                "--ss_ckpt", CKPT_DIR / "sparse_structure.pt",
-                "--shape_ckpt", CKPT_DIR / "shape_slat.pt",
-                "--tex_ckpt", CKPT_DIR / "texture_slat.pt",
+                "--ss_ckpt", ckpts["ss"],
+                "--shape_ckpt", ckpts["shape"],
+                "--tex_ckpt", ckpts["tex"],
                 "--num_imgs_per_scene", num_imgs,
                 "--chunk_size_factor", "1.08",
                 "--stat_std_ratio", "3.0",
