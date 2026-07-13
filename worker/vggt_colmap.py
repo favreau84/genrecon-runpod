@@ -135,6 +135,23 @@ def main(args):
     extrinsic = extrinsic.copy()
     extrinsic[:, :3, 3] *= scale
 
+    # Alignement gravité : le monde VGGT est le repère de la 1re caméra (Y bas,
+    # Z devant) alors que le chunker GenRecon suppose Z vertical (sol en XY,
+    # chunks posés sur le plan horizontal). On estime la verticale comme la
+    # moyenne des vecteurs "haut" caméra (téléphone tenu ~droit) et on tourne
+    # le monde pour l'amener sur +Z.
+    cam_up = -extrinsic[:, 1, :3]  # haut caméra en monde = -(2e ligne de R)
+    up = cam_up.mean(axis=0)
+    up /= np.linalg.norm(up)
+    fwd0 = extrinsic[0, 2, :3]  # regard de la 1re caméra, pour fixer X'
+    x_axis = fwd0 - np.dot(fwd0, up) * up
+    x_axis /= np.linalg.norm(x_axis)
+    y_axis = np.cross(up, x_axis)
+    A = np.stack([x_axis, y_axis, up])  # X' = A @ X : lignes = nouveaux axes
+    tilt = float(np.degrees(np.arccos(np.clip(np.dot(up, -extrinsic[0, 1, :3] / np.linalg.norm(extrinsic[0, 1, :3])), -1, 1))))
+    print(f"alignement gravité : up estimé {np.round(up, 3).tolist()}, tilt 1re caméra {tilt:.1f}°", flush=True)
+    extrinsic[:, :3, :3] = extrinsic[:, :3, :3] @ A.T
+
     points_3d = unproject_depth_map_to_point_map(depth_map, extrinsic, intrinsic)
 
     # Chemin feedforward (sans BA) de demo_colmap.py
