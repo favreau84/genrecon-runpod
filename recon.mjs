@@ -5,7 +5,7 @@
 
 import { createClient } from '@supabase/supabase-js';
 import { NodeIO } from '@gltf-transform/core';
-import { readFile, readdir, writeFile } from 'node:fs/promises';
+import { readFile, readdir, writeFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
 
@@ -43,17 +43,29 @@ const contentTypes = {
 async function main() {
   const dir = process.argv[2];
   if (!dir) {
-    console.error('Usage: node recon.mjs <dossier-photos>');
+    console.error('Usage: node recon.mjs <dossier-test>');
+    console.error('  <dossier-test>/input/  → photos (.jpg/.jpeg/.png/.webp)');
+    console.error('  <dossier-test>/scene.glb sera écrit à la racine du dossier.');
+    console.error('  (compat : si pas de sous-dossier input/, <dossier-test> = dossier de photos,');
+    console.error('   scene.glb écrit dans le dossier courant)');
     process.exit(1);
   }
   await loadEnv();
+  // Layout "un dossier par test" : photos dans <dir>/input, GLB à la racine de <dir>
+  let photoDir = dir;
+  let outPath = path.resolve('scene.glb');
+  const inputSub = path.join(dir, 'input');
+  if (await stat(inputSub).then((s) => s.isDirectory()).catch(() => false)) {
+    photoDir = inputSub;
+    outPath = path.resolve(dir, 'scene.glb');
+  }
   const supabase = createClient(need('SUPABASE_URL'), need('SUPABASE_SECRET_KEY'));
   const endpointId = need('RUNPOD_ENDPOINT_ID');
   const runpodKey = need('RUNPOD_API_KEY');
 
-  const files = (await readdir(dir)).filter((f) => IMAGE_EXTS.has(path.extname(f).toLowerCase()));
+  const files = (await readdir(photoDir)).filter((f) => IMAGE_EXTS.has(path.extname(f).toLowerCase()));
   if (files.length < 2) {
-    console.error(`Pas assez d'images dans ${dir} (trouvé : ${files.length})`);
+    console.error(`Pas assez d'images dans ${photoDir} (trouvé : ${files.length})`);
     process.exit(1);
   }
 
@@ -62,7 +74,7 @@ async function main() {
   console.log(`Job ${jobId} — upload de ${files.length} photos vers ${INPUT_BUCKET}/${prefix} …`);
 
   for (const f of files.sort()) {
-    const buf = await readFile(path.join(dir, f));
+    const buf = await readFile(path.join(photoDir, f));
     const { error } = await supabase.storage
       .from(INPUT_BUCKET)
       .upload(`${prefix}/${f}`, buf, {
@@ -136,7 +148,6 @@ async function main() {
     if (error) throw new Error(`Download scene.glb : ${error.message}`);
     glbBuf = Buffer.from(await data.arrayBuffer());
   }
-  const outPath = path.resolve('scene.glb');
   await writeFile(outPath, glbBuf);
 
   // Validation : le GLB s'ouvre et contient au moins un mesh non vide
