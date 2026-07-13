@@ -60,7 +60,9 @@ RUN git clone https://github.com/facebookresearch/vggt.git /opt/vggt \
     && pip install --no-deps -e /opt/vggt
 
 # Outils du handler : COLMAP I/O, nettoyage de points, storage, serverless
-RUN pip install pycolmap open3d runpod supabase
+# pycolmap épinglé : l'API Image/Reconstruction a changé après 3.10 et
+# vggt/dependency/np_to_pycolmap.py (commit a288dd0) cible 3.10.0
+RUN pip install pycolmap==3.10.0 open3d runpod supabase
 
 COPY worker/ /opt/worker/
 
