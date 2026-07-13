@@ -208,18 +208,32 @@ def handler(job):
         if not glb.exists() or glb.stat().st_size == 0:
             raise RuntimeError("chunked_to_glb.py n'a pas produit de scene.glb non vide")
 
-        # 6. Upload du résultat
-        sb = _sb()
-        with glb.open("rb") as f:
-            sb.storage.from_(output_bucket).upload(
-                output_key, f, {"content-type": "model/gltf-binary", "upsert": "true"}
-            )
+        # 6. Upload du résultat — en morceaux de <50 Mo (limite d'objet Supabase
+        # du plan gratuit) si nécessaire ; la CLI réassemble.
         size_mb = glb.stat().st_size / 1e6
+        part_bytes = int(float(os.environ.get("UPLOAD_PART_MB", "45")) * 1e6)
+        sb = _sb()
+        data = glb.read_bytes()
+        n_parts = 0
+        if len(data) <= part_bytes:
+            sb.storage.from_(output_bucket).upload(
+                output_key, data, {"content-type": "model/gltf-binary", "upsert": "true"}
+            )
+        else:
+            n_parts = (len(data) + part_bytes - 1) // part_bytes
+            for i in range(n_parts):
+                sb.storage.from_(output_bucket).upload(
+                    f"{output_key}.part{i:03d}",
+                    data[i * part_bytes : (i + 1) * part_bytes],
+                    {"content-type": "application/octet-stream", "upsert": "true"},
+                )
+                print(f"[output] part {i + 1}/{n_parts} envoyée", flush=True)
         print(f"[output] scene.glb ({size_mb:.1f} Mo) -> {output_bucket}/{output_key}", flush=True)
 
         return {
             "output_bucket": output_bucket,
             "output_key": output_key,
+            "parts": n_parts,
             "glb_size_mb": round(size_mb, 2),
             "n_images": n_images,
             "n_points3d": n_points3d,

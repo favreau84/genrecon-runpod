@@ -118,9 +118,24 @@ async function main() {
   console.log('Worker :', JSON.stringify(output));
 
   console.log(`Téléchargement de ${OUTPUT_BUCKET}/${outputKey} …`);
-  const { data, error } = await supabase.storage.from(OUTPUT_BUCKET).download(outputKey);
-  if (error) throw new Error(`Download scene.glb : ${error.message}`);
-  const glbBuf = Buffer.from(await data.arrayBuffer());
+  let glbBuf;
+  if (output?.parts > 0) {
+    // GLB > limite d'objet Supabase : le worker l'a découpé en .partNNN
+    const chunks = [];
+    for (let i = 0; i < output.parts; i++) {
+      const key = `${outputKey}.part${String(i).padStart(3, '0')}`;
+      const { data, error } = await supabase.storage.from(OUTPUT_BUCKET).download(key);
+      if (error) throw new Error(`Download ${key} : ${error.message}`);
+      chunks.push(Buffer.from(await data.arrayBuffer()));
+      process.stdout.write(`\rpart ${i + 1}/${output.parts}   `);
+    }
+    console.log();
+    glbBuf = Buffer.concat(chunks);
+  } else {
+    const { data, error } = await supabase.storage.from(OUTPUT_BUCKET).download(outputKey);
+    if (error) throw new Error(`Download scene.glb : ${error.message}`);
+    glbBuf = Buffer.from(await data.arrayBuffer());
+  }
   const outPath = path.resolve('scene.glb');
   await writeFile(outPath, glbBuf);
 
