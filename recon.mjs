@@ -5,7 +5,8 @@
 
 import { createClient } from '@supabase/supabase-js';
 import { NodeIO } from '@gltf-transform/core';
-import { readFile, readdir, writeFile, stat } from 'node:fs/promises';
+import { readFile, readdir, writeFile, stat, mkdir, rm } from 'node:fs/promises';
+import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import process from 'node:process';
 
@@ -63,9 +64,42 @@ async function main() {
   const endpointId = need('RUNPOD_ENDPOINT_ID');
   const runpodKey = need('RUNPOD_API_KEY');
 
-  const files = (await readdir(photoDir)).filter((f) => IMAGE_EXTS.has(path.extname(f).toLowerCase()));
+  // Vidéo(s) dans input/ : extraction de frames (régime nominal de GenRecon
+  // mode Iphone — beaucoup de vues très recouvrantes). Cap à MAX_FRAMES pour
+  // rester dans la mémoire de VGGT.
+  const VIDEO_EXTS = new Set(['.mp4', '.mov', '.m4v']);
+  const MAX_FRAMES = 64;
+  const entries = await readdir(photoDir);
+  const videos = entries.filter((f) => VIDEO_EXTS.has(path.extname(f).toLowerCase()));
+  let framesDir = null;
+  if (videos.length > 0) {
+    framesDir = path.join(photoDir, '.frames');
+    await rm(framesDir, { recursive: true, force: true });
+    await mkdir(framesDir, { recursive: true });
+    for (const [vi, v] of videos.entries()) {
+      const src = path.join(photoDir, v);
+      const dur = parseFloat(
+        execFileSync('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', src], {
+          encoding: 'utf8',
+        })
+      );
+      const fps = Math.min(3, Math.max(0.5, MAX_FRAMES / videos.length / Math.max(dur, 1)));
+      console.log(`Vidéo ${v} (${dur.toFixed(0)}s) → extraction à ${fps.toFixed(2)} img/s …`);
+      execFileSync('ffmpeg', [
+        '-loglevel', 'error', '-i', src,
+        '-vf', `fps=${fps},scale='min(1440,iw)':-2`,
+        '-q:v', '2', path.join(framesDir, `v${vi}_%04d.jpg`),
+      ]);
+    }
+  }
+  const listDir = framesDir ?? photoDir;
+  const files = (await readdir(listDir)).filter((f) => IMAGE_EXTS.has(path.extname(f).toLowerCase()));
   if (files.length < 2) {
-    console.error(`Pas assez d'images dans ${photoDir} (trouvé : ${files.length})`);
+    console.error(`Pas assez d'images dans ${listDir} (trouvé : ${files.length})`);
+    process.exit(1);
+  }
+  if (files.length > MAX_FRAMES) {
+    console.error(`${files.length} images > ${MAX_FRAMES} (limite mémoire VGGT) — réduisez le nombre de photos`);
     process.exit(1);
   }
 
@@ -74,7 +108,7 @@ async function main() {
   console.log(`Job ${jobId} — upload de ${files.length} photos vers ${INPUT_BUCKET}/${prefix} …`);
 
   for (const f of files.sort()) {
-    const buf = await readFile(path.join(photoDir, f));
+    const buf = await readFile(path.join(listDir, f));
     const { error } = await supabase.storage
       .from(INPUT_BUCKET)
       .upload(`${prefix}/${f}`, buf, {

@@ -121,6 +121,20 @@ def main(args):
     print(f"Loaded {len(images)} images from {image_dir}", flush=True)
 
     extrinsic, intrinsic, depth_map, depth_conf = run_VGGT(model, images, dtype, vggt_fixed_resolution)
+
+    # Normalisation d'échelle : VGGT est à échelle arbitraire, mais le chunker
+    # GenRecon (radius_m, tailles de chunks) suppose des mètres. On recale la
+    # profondeur médiane des pixels confiants sur une distance de prise de vue
+    # typique d'intérieur (SCENE_MEDIAN_DEPTH_M, défaut 2.5 m).
+    target_med = float(os.environ.get("SCENE_MEDIAN_DEPTH_M", "2.5"))
+    conf_med_mask = depth_conf >= max(1.05, float(np.quantile(depth_conf, 0.5)))
+    med_depth = float(np.median(depth_map[..., 0][conf_med_mask] if depth_map.ndim == 4 else depth_map[conf_med_mask]))
+    scale = target_med / max(med_depth, 1e-6)
+    print(f"profondeur médiane VGGT: {med_depth:.3f} -> échelle x{scale:.3f} (cible {target_med} m)", flush=True)
+    depth_map = depth_map * scale
+    extrinsic = extrinsic.copy()
+    extrinsic[:, :3, 3] *= scale
+
     points_3d = unproject_depth_map_to_point_map(depth_map, extrinsic, intrinsic)
 
     # Chemin feedforward (sans BA) de demo_colmap.py
