@@ -18,6 +18,7 @@ Poids attendus sur le network volume (montés en /runpod-volume) :
     /runpod-volume/torch   -> TORCH_HOME (VGGT-1B model.pt, cache torch.hub)
 """
 
+import collections
 import os
 import shutil
 import subprocess
@@ -47,20 +48,30 @@ def _sb():
 
 
 def _run(cmd, cwd, log_name):
-    """Lance un sous-processus en streamant stdout/stderr vers les logs RunPod."""
+    """Lance un sous-processus : stream vers les logs RunPod + garde la fin de la
+    sortie pour la remonter dans l'erreur du job (les logs console ne sont pas
+    accessibles par API)."""
     print(f"[{log_name}] $ {' '.join(str(c) for c in cmd)}", flush=True)
     t0 = time.time()
-    proc = subprocess.run(
+    tail = collections.deque(maxlen=60)
+    proc = subprocess.Popen(
         [str(c) for c in cmd],
         cwd=str(cwd),
-        stdout=sys.stdout,
-        stderr=sys.stderr,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
         env=os.environ.copy(),
     )
+    for line in proc.stdout:
+        print(f"[{log_name}] {line}", end="", flush=True)
+        tail.append(line)
+    proc.wait()
     dt = time.time() - t0
     print(f"[{log_name}] exit={proc.returncode} en {dt:.0f}s", flush=True)
     if proc.returncode != 0:
-        raise RuntimeError(f"{log_name} a échoué (exit {proc.returncode})")
+        raise RuntimeError(
+            f"{log_name} a échoué (exit {proc.returncode}). Fin de sortie :\n" + "".join(tail)[-3500:]
+        )
     return dt
 
 
@@ -118,8 +129,9 @@ def handler(job):
             os.link(f, scene / "rgb" / f.name)
 
         # 2. VGGT feedforward -> poses + nuage de points, COLMAP binaire dans sparse/
+        # (script local : demo_colmap.py upstream importe lightglue via track_predict)
         timings["vggt_s"] = _run(
-            [sys.executable, VGGT_DIR / "demo_colmap.py", "--scene_dir", scene],
+            [sys.executable, "/opt/worker/vggt_colmap.py", "--scene_dir", scene],
             cwd=VGGT_DIR,
             log_name="vggt",
         )
