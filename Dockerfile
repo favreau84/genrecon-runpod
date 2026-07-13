@@ -64,9 +64,21 @@ RUN git clone https://github.com/facebookresearch/vggt.git /opt/vggt \
 # vggt/dependency/np_to_pycolmap.py (commit a288dd0) cible 3.10.0
 RUN pip install pycolmap==3.10.0 open3d runpod supabase
 
+# MASt3R-SfM (commit épinglé) — moteur de poses du papier GenRecon.
+# ⚠ Licence CC BY-NC-SA 4.0 : usage non commercial uniquement.
+RUN git clone --recursive https://github.com/naver/mast3r.git /opt/mast3r \
+    && cd /opt/mast3r \
+    && git checkout f5209afc300cec36239a7ac992263f36847bbba0 \
+    && git submodule update --init --recursive \
+    && pip install scikit-learn roma matplotlib scipy "pyglet<2"
+
+# Extension CUDA RoPE de croco (optionnelle : fallback pytorch si échec)
+RUN cd /opt/mast3r/dust3r/croco/models/curope \
+    && python setup.py build_ext --inplace || echo "curope non compilé : fallback pytorch"
+
 COPY worker/ /opt/worker/
 
-ENV PYTHONPATH=/opt/GenRecon \
+ENV PYTHONPATH=/opt/GenRecon:/opt/mast3r \
     HF_HUB_ENABLE_HF_TRANSFER=1 \
     ATTN_BACKEND=flash_attn \
     SPARSE_CONV_BACKEND=flex_gemm

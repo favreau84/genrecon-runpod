@@ -118,6 +118,18 @@ def _download_images(sb, bucket, prefix, dest: Path):
     return len(names)
 
 
+def _count_points3d(points3d_txt):
+    with open(points3d_txt, "r", encoding="utf-8") as f:
+        n_pts = sum(1 for l in f if l.strip() and not l.startswith("#"))
+    print(f"[colmap] {n_pts} points3D dans {points3d_txt}", flush=True)
+    if n_pts < 100:
+        raise RuntimeError(
+            f"MASt3R n'a produit que {n_pts} points3D — nuage trop pauvre pour le "
+            "chunker GenRecon (photos trop peu texturées ou chevauchement insuffisant ?)"
+        )
+    return n_pts
+
+
 def _sparse_bin_to_txt(sparse_dir: Path, txt_dir: Path):
     """VGGT écrit du COLMAP binaire dans sparse/ ; GenRecon (mode Iphone) lit du texte."""
     import pycolmap
@@ -158,16 +170,26 @@ def handler(job):
         for f in (scene / "images").iterdir():
             os.link(f, scene / "rgb" / f.name)
 
-        # 2. VGGT feedforward -> poses + nuage de points, COLMAP binaire dans sparse/
-        # (script local : demo_colmap.py upstream importe lightglue via track_predict)
-        timings["vggt_s"] = _run(
-            [sys.executable, "/opt/worker/vggt_colmap.py", "--scene_dir", scene],
-            cwd=VGGT_DIR,
-            log_name="vggt",
-        )
-
-        # 3. Conversion binaire -> texte, arborescence attendue par --mode Iphone
-        n_points3d = _sparse_bin_to_txt(scene / "sparse", scene / "colmap")
+        # 2-3. Poses + nuage de points -> COLMAP texte dans scene/colmap/
+        # mast3r (défaut) : le moteur SfM du papier, échelle métrique native.
+        # vggt (fallback, input.pose_engine="vggt") : feedforward, plus rapide.
+        engine = str(inp.get("pose_engine", "mast3r")).lower()
+        if engine == "mast3r":
+            timings["mast3r_s"] = _run(
+                [sys.executable, "/opt/worker/mast3r_colmap.py", "--scene_dir", scene],
+                cwd="/opt/mast3r",
+                log_name="mast3r",
+            )
+            n_points3d = _count_points3d(scene / "colmap" / "points3D.txt")
+        elif engine == "vggt":
+            timings["vggt_s"] = _run(
+                [sys.executable, "/opt/worker/vggt_colmap.py", "--scene_dir", scene],
+                cwd=VGGT_DIR,
+                log_name="vggt",
+            )
+            n_points3d = _sparse_bin_to_txt(scene / "sparse", scene / "colmap")
+        else:
+            raise RuntimeError(f"pose_engine inconnu : {engine} (attendu : mast3r | vggt)")
 
         # 4. GenRecon (flags iPhone du README ; cwd=GenRecon pour les configs relatives)
         timings["genrecon_s"] = _run(
