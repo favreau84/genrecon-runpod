@@ -127,6 +127,12 @@ def _sparse_bin_to_txt(sparse_dir: Path, txt_dir: Path):
     rec.write_text(str(txt_dir))
     n_pts = rec.num_points3D() if callable(getattr(rec, "num_points3D", None)) else len(rec.points3D)
     print(f"[colmap] {len(rec.images)} images, {n_pts} points3D -> {txt_dir}", flush=True)
+    if n_pts < 100:
+        raise RuntimeError(
+            f"VGGT n'a produit que {n_pts} points3D — nuage trop pauvre pour le "
+            "chunker GenRecon (photos trop peu texturées ou chevauchement insuffisant ?)"
+        )
+    return n_pts
 
 
 def handler(job):
@@ -161,7 +167,7 @@ def handler(job):
         )
 
         # 3. Conversion binaire -> texte, arborescence attendue par --mode Iphone
-        _sparse_bin_to_txt(scene / "sparse", scene / "colmap")
+        n_points3d = _sparse_bin_to_txt(scene / "sparse", scene / "colmap")
 
         # 4. GenRecon (flags iPhone du README ; cwd=GenRecon pour les configs relatives)
         timings["genrecon_s"] = _run(
@@ -216,6 +222,7 @@ def handler(job):
             "output_key": output_key,
             "glb_size_mb": round(size_mb, 2),
             "n_images": n_images,
+            "n_points3d": n_points3d,
             "timings": {k: round(v) for k, v in timings.items()},
         }
     except Exception as e:

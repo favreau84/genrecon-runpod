@@ -140,7 +140,17 @@ def main(args):
 
     points_xyf = create_pixel_coordinate_grid(num_frames, height, width)
 
-    conf_mask = depth_conf >= conf_thres_value
+    # Seuil adaptatif : le défaut demo (5.0) peut éliminer ~tous les points
+    # selon la scène (observé : 0 point -> chunker GenRecon plante). On garde
+    # au minimum les 25 % de pixels les plus confiants, plancher à 1.05.
+    q = [float(np.quantile(depth_conf, p)) for p in (0.25, 0.5, 0.75, 0.9)]
+    print(f"depth_conf quantiles 25/50/75/90: {[round(v, 2) for v in q]}", flush=True)
+    conf_thres = min(conf_thres_value, max(1.05, q[2]))
+    if conf_thres != conf_thres_value:
+        print(f"conf_thres_value {conf_thres_value} -> {conf_thres:.2f} (adaptatif)", flush=True)
+
+    conf_mask = depth_conf >= conf_thres
+    print(f"points au-dessus du seuil : {int(conf_mask.sum())}", flush=True)
     conf_mask = randomly_limit_trues(conf_mask, max_points_for_colmap)
 
     points_3d = points_3d[conf_mask]
