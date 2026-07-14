@@ -36,7 +36,9 @@ WEAK_CONF = 5.0  # aligné sur matching_conf_thr
 
 
 def _build_pairs(imgs):
-    """Paires séquentielles cycliques à distance 1 et 2 (dédoublonnées) :
+    """Paires séquentielles cycliques à distance 1 et 2 (dédoublonnées puis
+    SYMÉTRISÉES — l'optimiseur de sparse_ga indexe is_matching_ok dans les
+    deux sens, cf. make_pairs(symmetrize=True) dans mast3r_extract.py) :
     l'ordre de prise de vue donne le graphe — pas de matching N², et la
     distance 2 sert de chemin de secours si un coin est mal couvert."""
     n = len(imgs)
@@ -48,6 +50,7 @@ def _build_pairs(imgs):
             if i != j and key not in seen:
                 seen.add(key)
                 pairs.append((imgs[i], imgs[j]))
+    pairs += [(b, a) for a, b in pairs]  # symétrisation
     return pairs
 
 
@@ -58,8 +61,12 @@ def _pair_scores(cache, image_list, pairs):
 
     cdir = Path(cache) / "corres_conf=desc_conf_subsample=8"
     out = []
+    seen = set()
     for a, b in pairs:
         i, j = a["idx"], b["idx"]
+        if (min(i, j), max(i, j)) in seen:  # paires symétrisées : un seul sens
+            continue
+        seen.add((min(i, j), max(i, j)))
         pi, pj = image_list[i], image_list[j]
         score = None
         for p1, p2 in ((pi, pj), (pj, pi)):
