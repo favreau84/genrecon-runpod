@@ -38,7 +38,8 @@ from PIL import Image  # noqa: E402
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
 
-CAM_HEIGHT_RANGE = (1.0, 2.0)   # m, iPhone tenu à la main
+CAM_HEIGHT_RANGE = (1.0, 2.0)    # m, iPhone tenu à la main (vs sol)
+CAM_CEILING_RANGE = (0.3, 1.8)   # m, distance caméra→plafond (sol non détecté)
 ROOM_DIAMETER_RANGE = (1.5, 20.0)  # m
 
 
@@ -56,14 +57,20 @@ def _load_models(dust3r_ckpt, noncuboid_ckpt, device):
 
 
 def _metric_check(node_data, cam_centers, scale=1.0):
-    """Hauteur caméra / diamètre de pièce plausibles après mise à l'échelle ?"""
+    """Hauteur caméra / diamètre de pièce plausibles après mise à l'échelle ?
+    Sol souvent non détecté : on se rabat sur la distance caméra→plafond
+    (plage [0.3, 1.8] m — téléphone à hauteur d'homme sous 2-3 m de plafond)."""
     result = {"scale_tested": scale, "cam_height_m": None, "room_diameter_m": None, "passed": False}
-    floor = node_data.get("floor_pparam") or node_data.get("ceiling_pparam")
-    if not floor:
+    floor = node_data.get("floor_pparam")
+    ref, rng = floor, CAM_HEIGHT_RANGE
+    if not ref:
+        ref, rng = node_data.get("ceiling_pparam"), CAM_CEILING_RANGE
+        result["reference"] = "ceiling"
+    if not ref:
         return result
-    n = np.array(floor[:3], float)
+    n = np.array(ref[:3], float)
     n /= np.linalg.norm(n)
-    d = float(floor[3]) * scale
+    d = float(ref[3]) * scale
     cams = np.array(cam_centers, float) * scale
     heights = np.abs(cams @ n + d)
     result["cam_height_m"] = round(float(np.mean(heights)), 3)
@@ -78,7 +85,7 @@ def _metric_check(node_data, cam_centers, scale=1.0):
         pts = np.stack(endpoints)
         result["room_diameter_m"] = round(float(np.linalg.norm(pts.max(0) - pts.min(0))), 3)
 
-    ok_h = CAM_HEIGHT_RANGE[0] <= result["cam_height_m"] <= CAM_HEIGHT_RANGE[1]
+    ok_h = rng[0] <= result["cam_height_m"] <= rng[1]
     ok_d = result["room_diameter_m"] is None or (
         ROOM_DIAMETER_RANGE[0] <= result["room_diameter_m"] <= ROOM_DIAMETER_RANGE[1]
     )

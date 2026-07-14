@@ -12,6 +12,7 @@
 import argparse
 import json
 import math
+import os
 
 import numpy as np
 from shapely.geometry import Polygon
@@ -21,6 +22,10 @@ COLLINEAR_DEG = 10.0   # sous cet angle entre deux murs, l'intersection est inst
 MERGE_DEG = 3.0        # murs consécutifs quasi-colinéaires fusionnés dans le polygone
 MIN_VERTEX_DIST = 0.02  # 2 cm
 ORTHO_SNAP_DEG = 15.0  # murs redressés sur l'axe dominant (0/90°) sous cette tolérance
+CAM_HEIGHT_M = float(os.environ.get("PLAN_CAM_HEIGHT", "1.5"))  # si sol non détecté
+WALL_CLUSTER_DEG = 12.0    # murs quasi-coplanaires fusionnés avant chaînage :
+WALL_CLUSTER_DIST = 0.35   # angle des normales, écart d'offset (m)…
+WALL_CLUSTER_GAP = 1.5     # …et distance min entre leurs endpoints (m)
 
 
 def _unit(v):
@@ -29,20 +34,27 @@ def _unit(v):
 
 
 def _oriented_floor(raw, warnings):
-    """Plan du sol (n, d) avec n pointant vers le haut (caméras au-dessus)."""
+    """Plan du sol (n, d) avec n pointant vers le haut (caméras au-dessus).
+    Sol non détecté (fréquent : mobilier, caméra à hauteur d'homme) → plan
+    synthétique CAM_HEIGHT_M sous la hauteur moyenne des caméras, orienté par
+    la normale du plafond. Le miroir du plafond utilisé par custom.py donne
+    des hauteurs absurdes (h = 2× la distance caméra-plafond)."""
     floor = list(raw.get("floor_pparam") or [])
     ceiling = list(raw.get("ceiling_pparam") or [])
     if not floor and not ceiling:
         raise ValueError("ni sol ni plafond détecté (floor_pparam et ceiling_pparam vides)")
-    if not floor:
-        # même convention que custom.py : sol = plafond avec normale retournée
-        floor = [ceiling[0], -ceiling[1], ceiling[2], ceiling[3]]
-        warnings.append("sol non détecté, déduit du plafond")
-    n, d = _unit(np.array(floor[:3], float)), float(floor[3])
     cams = np.array(raw["cam_centers"], float)
-    if np.mean(cams @ n + d) < 0:
-        n, d = -n, -d
-    return n, d, ceiling
+    if floor:
+        n, d = _unit(np.array(floor[:3], float)), float(floor[3])
+        if np.mean(cams @ n + d) < 0:  # caméras au-dessus du sol
+            n, d = -n, -d
+        return n, d, ceiling
+    n, dc = _unit(np.array(ceiling[:3], float)), float(ceiling[3])
+    if np.mean(cams @ n + dc) > 0:  # caméras SOUS le plafond
+        n, dc = -n, -dc
+    d = -(float(np.mean(cams @ n)) - CAM_HEIGHT_M)
+    warnings.append(f"sol non détecté : estimé {CAM_HEIGHT_M} m sous les caméras")
+    return n, d, [n[0], n[1], n[2], dc]
 
 
 def _ceiling_height(up, d_floor, ceiling, warnings):
@@ -59,21 +71,134 @@ def _ceiling_height(up, d_floor, ceiling, warnings):
     return h
 
 
+def _wall_len(w):
+    a, b = w.get("left_endpoint"), w.get("right_endpoint")
+    if a is None or b is None:
+        return 0.0
+    return float(np.linalg.norm(np.array(b, float) - np.array(a, float)))
+
+
+def _cluster_walls(walls, warnings):
+    """Fusionne les murs quasi-coplanaires (le même mur vu de plusieurs frames
+    ressort souvent en plusieurs nœuds non reliés — 15 murs pour ~6 réels
+    observés). Union-find sur (angle des normales, écart d'offset, proximité
+    des endpoints), pparam moyenné pondéré par la longueur, liens agrégés."""
+    if len(walls) < 2:
+        return walls
+    parent = list(range(len(walls)))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def endpoints(w):
+        return [np.array(p, float) for p in (w.get("left_endpoint"), w.get("right_endpoint"))
+                if p is not None]
+
+    cos_tol = math.cos(math.radians(WALL_CLUSTER_DEG))
+    for i in range(len(walls)):
+        ni = np.array(walls[i]["pparam"][:3], float)
+        di = float(walls[i]["pparam"][3])
+        for j in range(i + 1, len(walls)):
+            nj = np.array(walls[j]["pparam"][:3], float)
+            dj = float(walls[j]["pparam"][3])
+            dot = float(np.dot(ni, nj))
+            if abs(dot) < cos_tol:
+                continue
+            if dot < 0:
+                nj, dj = -nj, -dj
+            if abs(di - dj) > WALL_CLUSTER_DIST:
+                continue
+            pi, pj = endpoints(walls[i]), endpoints(walls[j])
+            if pi and pj and min(np.linalg.norm(a - b) for a in pi for b in pj) > WALL_CLUSTER_GAP:
+                continue  # coplanaires mais éloignés : deux murs alignés distincts
+            parent[find(i)] = find(j)
+
+    groups = {}
+    for idx in range(len(walls)):
+        groups.setdefault(find(idx), []).append(idx)
+    if len(groups) == len(walls):
+        return walls
+    members_list = list(groups.values())
+    old_to_new = {}
+    for gi, members in enumerate(members_list):
+        for m in members:
+            old_to_new[walls[m]["index"]] = gi
+
+    merged = []
+    for gi, members in enumerate(members_list):
+        ws = [walls[m] for m in members]
+        wts = [max(_wall_len(w), 0.1) for w in ws]
+        ref = np.array(ws[0]["pparam"][:3], float)
+        nsum, dsum = np.zeros(3), 0.0
+        for w, wt in zip(ws, wts):
+            n = np.array(w["pparam"][:3], float)
+            d = float(w["pparam"][3])
+            if np.dot(n, ref) < 0:
+                n, d = -n, -d
+            nsum += wt * n
+            dsum += wt * d
+        n = _unit(nsum)
+        d = dsum / sum(wts)
+        # endpoints extrêmes le long de la direction du membre le plus long
+        longest = ws[int(np.argmax(wts))]
+        pts = [p for w in ws for p in endpoints(w)]
+        left = right = None
+        if pts and longest.get("left_endpoint") is not None and longest.get("right_endpoint") is not None:
+            u = _unit(np.array(longest["right_endpoint"], float) - np.array(longest["left_endpoint"], float))
+            t = [float(np.dot(p, u)) for p in pts]
+            left = pts[int(np.argmin(t))].tolist()
+            right = pts[int(np.argmax(t))].tolist()
+
+        def vote(key):
+            cands = [old_to_new.get(w[key]) for w in ws if w.get(key) is not None]
+            cands = [c for c in cands if c is not None and c != gi]
+            return max(set(cands), key=cands.count) if cands else None
+
+        merged.append({
+            "index": gi,
+            "pparam": [float(n[0]), float(n[1]), float(n[2]), float(d)],
+            "pre": vote("pre"),
+            "next": vote("next"),
+            "left_endpoint": left,
+            "right_endpoint": right,
+        })
+    warnings.append(f"{len(walls)} murs détectés regroupés en {len(merged)} (vues multiples fusionnées)")
+    return merged
+
+
 def _chains(walls):
-    """Chaînes de murs via le graphe pre/next. Retourne (chaîne la plus longue, fermée ?)."""
+    """Chaînes de murs via le graphe pre/next. Seuls les liens RÉCIPROQUES
+    (w.next = x ET x.pre = w) sont suivis : le graphe brut a du fan-in (
+    plusieurs murs revendiquent le même next), et suivre un lien non confirmé
+    fait démarrer la chaîne dominante sur un mur parasite. Retourne
+    (chaîne la plus longue, fermée ?, tailles des chaînes ignorées)."""
     by_id = {w["index"]: w for w in walls}
+
+    def succ(w):
+        nxt = by_id.get(w["next"]) if w["next"] is not None else None
+        return nxt if nxt is not None and nxt["pre"] == w["index"] else None
+
+    has_valid_pre = {w["index"]: False for w in walls}
+    for w in walls:
+        s = succ(w)
+        if s is not None:
+            has_valid_pre[s["index"]] = True
+
     chains = []
     visited = set()
-    # chaînes ouvertes : départ = murs sans pre (ou dont le pre est manquant)
+    # chaînes ouvertes : départ = murs sans prédécesseur confirmé
     for w in walls:
-        if w["index"] in visited or (w["pre"] is not None and w["pre"] in by_id):
+        if w["index"] in visited or has_valid_pre[w["index"]]:
             continue
         chain = []
         cur = w
         while cur is not None and cur["index"] not in visited:
             visited.add(cur["index"])
             chain.append(cur)
-            cur = by_id.get(cur["next"]) if cur["next"] is not None else None
+            cur = succ(cur)
         chains.append((chain, False))
     # le reste = cycles (pièce fermée)
     for w in walls:
@@ -84,13 +209,15 @@ def _chains(walls):
         while cur["index"] not in visited:
             visited.add(cur["index"])
             chain.append(cur)
-            cur = by_id.get(cur["next"])
+            cur = succ(cur)
             if cur is None:
                 break
         chains.append((chain, cur is not None and chain and cur["index"] == chain[0]["index"]))
     if not chains:
         raise ValueError("aucun mur dans global_plane_info")
-    chains.sort(key=lambda c: len(c[0]), reverse=True)
+    # la chaîne dominante est celle qui couvre le plus de longueur de mur,
+    # pas celle qui a le plus de segments (les doublons courts trichent)
+    chains.sort(key=lambda c: sum(_wall_len(w) for w in c[0]), reverse=True)
     if len(chains) > 1:
         return chains[0][0], chains[0][1], [len(c[0]) for c in chains[1:]]
     return chains[0][0], chains[0][1], []
@@ -292,6 +419,7 @@ def layout_to_geojson(raw, job_id=None):
     # d_floor tel que up·x + d_floor = 0 sur le sol ; offset du sol le long de up = -d_floor
     height = _ceiling_height(up, d_floor, ceiling, warnings)
 
+    walls = _cluster_walls(walls, warnings)
     chain, closed, dropped = _chains(walls)
     if dropped:
         warnings.append(f"chaînes de murs secondaires ignorées : {dropped}")
