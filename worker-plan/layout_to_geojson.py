@@ -20,6 +20,7 @@ MIN_AREA_M2 = 0.5
 COLLINEAR_DEG = 10.0   # sous cet angle entre deux murs, l'intersection est instable
 MERGE_DEG = 3.0        # murs consécutifs quasi-colinéaires fusionnés dans le polygone
 MIN_VERTEX_DIST = 0.02  # 2 cm
+ORTHO_SNAP_DEG = 15.0  # murs redressés sur l'axe dominant (0/90°) sous cette tolérance
 
 
 def _unit(v):
@@ -112,10 +113,10 @@ def _project(p, origin, e1, e2):
     return np.array([np.dot(p - origin, e1), np.dot(p - origin, e2)])
 
 
-def _intersect_2d(w1, w2, origin, e1, e2):
-    """Intersection des droites 2D de deux murs ; None si quasi-parallèles."""
-    n1, c1 = _wall_line_2d(w1, origin, e1, e2)
-    n2, c2 = _wall_line_2d(w2, origin, e1, e2)
+def _intersect_2d(line1, line2):
+    """Intersection de deux droites 2D (n, c) ; None si quasi-parallèles."""
+    n1, c1 = line1
+    n2, c2 = line2
     if n1 is None or n2 is None:
         return None
     cross = abs(n1[0] * n2[1] - n1[1] * n2[0])  # sin(angle entre normales)
@@ -124,6 +125,141 @@ def _intersect_2d(w1, w2, origin, e1, e2):
     A = np.array([n1, n2])
     b = np.array([-c1, -c2])
     return np.linalg.solve(A, b)
+
+
+def _orthogonalize(chain, lines, origin, e1, e2, lengths, warnings):
+    """Redresse les murs : axe dominant (angles repliés mod 90°, pondérés par la
+    longueur), puis snap des normales à ±ORTHO_SNAP_DEG vers 0/90°. L'offset est
+    recalculé pour que la droite passe par le milieu du mur — les murs vraiment
+    obliques (au-delà de la tolérance) ne sont pas touchés."""
+    angles = []
+    for line, length in zip(lines, lengths):
+        if line[0] is None:
+            angles.append(None)
+            continue
+        angles.append(math.degrees(math.atan2(line[0][1], line[0][0])))
+    # moyenne circulaire sur 4θ (une normale mod 90° = une direction d'axe)
+    sx = sum(l * math.cos(math.radians(4 * a)) for a, l in zip(angles, lengths) if a is not None)
+    sy = sum(l * math.sin(math.radians(4 * a)) for a, l in zip(angles, lengths) if a is not None)
+    if abs(sx) < 1e-9 and abs(sy) < 1e-9:
+        return lines
+    dominant = math.degrees(math.atan2(sy, sx)) / 4.0
+    snapped = 0
+    out = []
+    for wall, line, a in zip(chain, lines, angles):
+        if a is None:
+            out.append(line)
+            continue
+        residual = (a - dominant) % 90.0
+        delta = residual if residual < 45.0 else residual - 90.0
+        if abs(delta) > ORTHO_SNAP_DEG:
+            out.append(line)  # mur réellement oblique : conservé tel quel
+            continue
+        theta = math.radians(a - delta)
+        n_new = np.array([math.cos(theta), math.sin(theta)])
+        # la droite redressée passe par le milieu du mur
+        ends = [wall.get("left_endpoint"), wall.get("right_endpoint")]
+        pts = [_project(p, origin, e1, e2) for p in ends if p is not None]
+        anchor = np.mean(pts, axis=0) if pts else -line[1] * line[0]
+        out.append((n_new, -float(np.dot(n_new, anchor))))
+        if abs(delta) > 0.5:
+            snapped += 1
+    if snapped:
+        warnings.append(f"{snapped} mur(s) redressé(s) sur l'axe dominant (±{ORTHO_SNAP_DEG}°)")
+    return out
+
+
+OPENING_WALL_DIST = 0.35   # m : distance max des points 3D au mur assigné
+OPENING_MIN_WIDTH = 0.35   # m : en-dessous, bruit de détection
+OPENING_MERGE_GAP = 0.25   # m : intervalles plus proches fusionnés (multi-vues)
+
+
+def _opening_features(raw, scale, origin, e1, e2, up, d_floor, coords, warnings):
+    """openings_raw (détections OWLv2 + points 3D du pointmap) → features GeoJSON.
+    Assignation géométrique au mur FINAL le plus proche (pas d'indices à suivre à
+    travers le nettoyage), intervalle le long du mur, fusion multi-vues."""
+    dets = raw.get("openings_raw") or []
+    if not dets:
+        return [], 0, 0
+    segs = [(np.array(coords[i], float), np.array(coords[(i + 1) % len(coords)], float))
+            for i in range(len(coords))]
+
+    per_wall = {}
+    for det in dets:
+        pts = np.array(det["points"], float) * scale
+        if pts.ndim != 2 or len(pts) < 8:
+            continue
+        xy = np.stack([(pts - origin) @ e1, (pts - origin) @ e2], axis=1)
+        heights = pts @ up + d_floor
+        # mur le plus proche (médiane des distances point→segment)
+        best, best_d = None, None
+        for wi, (a, b) in enumerate(segs):
+            ab = b - a
+            L2 = float(ab @ ab)
+            if L2 < 1e-9:
+                continue
+            t = np.clip((xy - a) @ ab / L2, 0.0, 1.0)
+            d = np.median(np.linalg.norm(xy - (a + t[:, None] * ab), axis=1))
+            if best_d is None or d < best_d:
+                best, best_d = wi, d
+        if best is None or best_d > OPENING_WALL_DIST:
+            continue
+        a, b = segs[best]
+        u_dir = (b - a) / np.linalg.norm(b - a)
+        t = (xy - a) @ u_dir
+        t0, t1 = float(np.percentile(t, 8)), float(np.percentile(t, 92))
+        t0, t1 = max(t0, 0.0), min(t1, float(np.linalg.norm(b - a)))
+        if t1 - t0 < OPENING_MIN_WIDTH:
+            continue
+        per_wall.setdefault((best, det["label"]), []).append({
+            "t0": t0, "t1": t1,
+            "sill": float(np.percentile(heights, 5)),
+            "head": float(np.percentile(heights, 95)),
+            "score": float(det.get("score", 0.5)),
+        })
+
+    def rnd(x):
+        return round(float(x), 3)
+
+    features = []
+    n_doors = n_windows = 0
+    for (wi, label), items in sorted(per_wall.items()):
+        items.sort(key=lambda o: o["t0"])
+        merged = [dict(items[0], votes=1)]
+        for o in items[1:]:
+            if o["t0"] <= merged[-1]["t1"] + OPENING_MERGE_GAP:
+                m = merged[-1]
+                m["t0"], m["t1"] = min(m["t0"], o["t0"]), max(m["t1"], o["t1"])
+                m["sill"] = min(m["sill"], o["sill"])
+                m["head"] = max(m["head"], o["head"])
+                m["score"] = max(m["score"], o["score"])
+                m["votes"] += 1
+            else:
+                merged.append(dict(o, votes=1))
+        a, b = segs[wi]
+        u_dir = (b - a) / np.linalg.norm(b - a)
+        for m in merged:
+            p0, p1 = a + m["t0"] * u_dir, a + m["t1"] * u_dir
+            if label == "door":
+                n_doors += 1
+            else:
+                n_windows += 1
+            features.append({
+                "type": "Feature",
+                "geometry": {"type": "LineString",
+                             "coordinates": [[rnd(p0[0]), rnd(p0[1])], [rnd(p1[0]), rnd(p1[1])]]},
+                "properties": {
+                    "kind": "opening",
+                    "opening_type": label,
+                    "wall_index": wi,
+                    "width_m": rnd(m["t1"] - m["t0"]),
+                    "sill_height_m": rnd(max(m["sill"], 0.0)),
+                    "head_height_m": rnd(m["head"]),
+                    "confidence": rnd(m["score"]),
+                    "n_views": m["votes"],
+                },
+            })
+    return features, n_doors, n_windows
 
 
 def layout_to_geojson(raw, job_id=None):
@@ -176,16 +312,31 @@ def layout_to_geojson(raw, job_id=None):
     e1 = _unit(d3) if ln > 1e-6 else _unit(np.cross(up, [0.0, 0.0, 1.0]))
     e2 = np.cross(up, e1)
 
+    # droites 2D des murs, redressées sur l'axe dominant si demandé
+    lines = [_wall_line_2d(w, origin, e1, e2) for w in chain]
+    if raw.get("ortho", True):
+        lengths = [horiz_dir(w)[1] or 0.1 for w in chain]
+        lines = _orthogonalize(chain, lines, origin, e1, e2, lengths, warnings)
+
     # sommets : intersection des droites 2D de murs consécutifs ;
     # extrémités de chaîne ouverte = endpoints projetés
     verts = []
     inferred_flags = []  # inferred_flags[i] : le mur entre verts[i] et verts[i+1] est déduit
-    pairs = list(zip(chain, chain[1:] + [chain[0]])) if closed else list(zip(chain, chain[1:]))
+    idx_pairs = list(zip(range(len(chain)), [*range(1, len(chain)), 0])) if closed \
+        else list(zip(range(len(chain) - 1), range(1, len(chain))))
+    def on_line(p3d, line):
+        if p3d is None:
+            return None
+        p = _project(p3d, origin, e1, e2)
+        if line[0] is None:
+            return p
+        return p - (float(np.dot(line[0], p)) + line[1]) * line[0]  # pied sur la droite
+
     if not closed:
-        p = chain[0].get("left_endpoint")
-        verts.append(_project(p, origin, e1, e2) if p is not None else None)
-    for w1, w2 in pairs:
-        v = _intersect_2d(w1, w2, origin, e1, e2)
+        verts.append(on_line(chain[0].get("left_endpoint"), lines[0]))
+    for i1, i2 in idx_pairs:
+        w1, w2 = chain[i1], chain[i2]
+        v = _intersect_2d(lines[i1], lines[i2])
         if v is None:
             # murs quasi-colinéaires : milieu des endpoints projetés
             a, b = w1.get("right_endpoint"), w2.get("left_endpoint")
@@ -196,8 +347,7 @@ def layout_to_geojson(raw, job_id=None):
                 continue
         verts.append(v)
     if not closed:
-        p = chain[-1].get("right_endpoint")
-        verts.append(_project(p, origin, e1, e2) if p is not None else None)
+        verts.append(on_line(chain[-1].get("right_endpoint"), lines[-1]))
     verts = [v for v in verts if v is not None]
     if len(verts) < 3:
         raise ValueError(f"seulement {len(verts)} sommets exploitables — plan inutilisable")
@@ -258,6 +408,9 @@ def layout_to_geojson(raw, job_id=None):
         return round(float(x), 3)
 
     coords = [[rnd(v[0]), rnd(v[1])] for v in verts]
+    opening_feats, n_doors, n_windows = _opening_features(
+        raw, scale, origin, e1, e2, up, d_floor, coords, warnings
+    )
     features = [{
         "type": "Feature",
         "geometry": {"type": "Polygon", "coordinates": [coords + [coords[0]]]},
@@ -270,6 +423,8 @@ def layout_to_geojson(raw, job_id=None):
             "scale_mode": raw.get("scale_mode"),
             "scale_factor": rnd(scale),
             "n_walls": len(coords),
+            "n_doors": n_doors,
+            "n_windows": n_windows,
             "n_frames": len(raw.get("image_names") or raw["cam_centers"]),
             "warnings": warnings,
         },
@@ -286,6 +441,7 @@ def layout_to_geojson(raw, job_id=None):
                 "inferred": bool(inferred_flags[i]),
             },
         })
+    features.extend(opening_feats)
     return {
         "type": "FeatureCollection",
         "properties": {
@@ -310,7 +466,8 @@ def main():
     with open(args.out, "w") as f:
         json.dump(geojson, f, indent=2)
     props = geojson["features"][0]["properties"]
-    print(f"plan.geojson : {props['n_walls']} murs, {props['area_m2']} m², "
+    print(f"plan.geojson : {props['n_walls']} murs, {props['n_doors']} porte(s), "
+          f"{props['n_windows']} fenêtre(s), {props['area_m2']} m², "
           f"h={props['ceiling_height_m']} m, closed={props['closed']}, warnings={props['warnings']}")
 
 

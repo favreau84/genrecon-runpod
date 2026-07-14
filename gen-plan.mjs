@@ -117,7 +117,8 @@ async function main() {
 
   const p = room.properties;
   console.log(
-    `✅ ${geoPath} — ${p.n_walls} murs, ${p.area_m2} m², h. plafond ${p.ceiling_height_m ?? '?'} m ` +
+    `✅ ${geoPath} — ${p.n_walls} murs, ${p.n_doors ?? 0} porte(s), ${p.n_windows ?? 0} fenêtre(s), ` +
+    `${p.area_m2} m², h. plafond ${p.ceiling_height_m ?? '?'} m ` +
     `(échelle : ${p.scale_mode}${p.closed ? '' : ', pièce partiellement filmée'})`
   );
   if (p.warnings?.length) console.log(`⚠ ${p.warnings.join(' | ')}`);

@@ -21,6 +21,7 @@ RUN pip install \
     scipy shapely easydict opencv-python-headless pillow pyyaml tqdm \
     einops roma safetensors trimesh matplotlib numba open3d \
     scikit-learn tensorboardX \
+    transformers==4.57.3 \
     "huggingface_hub[cli]" hf_transfer \
     runpod supabase
 

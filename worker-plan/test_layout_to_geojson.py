@@ -109,10 +109,99 @@ def test_ccw_orientation():
     print("✓ orientation CCW")
 
 
+def skewed_room(deg=4.0):
+    """Rectangle 4×3 dont les murs A et C sont tournés de ±deg° : l'axe dominant
+    doit les redresser en angles droits."""
+    import math
+    room = rect_room()
+    for idx, sign in ((0, 1), (2, -1)):
+        a = math.radians(sign * deg)
+        # normale [0,0,1] tournée de a autour de Y (axe vertical de la fixture)
+        n = [math.sin(a), 0.0, math.cos(a)]
+        w = room["global_plane_info"][idx]
+        # le plan passe toujours par le milieu du mur d'origine
+        mid = [(l + r) / 2 for l, r in zip(w["left_endpoint"], w["right_endpoint"])]
+        d = -(n[0] * mid[0] + n[1] * mid[1] + n[2] * mid[2])
+        w["pparam"] = n + [d]
+    return room
+
+
+def test_orthogonalize():
+    geo = layout_to_geojson(skewed_room())
+    props, ring = room_props(geo)
+    close(props["area_m2"], 12.0, tol=0.3)
+    assert any("redressé" in w for w in props["warnings"]), props["warnings"]
+    for i in range(len(ring) - 1):
+        a, b = ring[i], ring[i + 1]
+        c = ring[(i + 2) % (len(ring) - 1)] if i + 2 <= len(ring) - 1 else ring[1]
+        v1 = [b[0] - a[0], b[1] - a[1]]
+        v2 = [c[0] - b[0], c[1] - b[1]]
+        dot = abs(v1[0] * v2[0] + v1[1] * v2[1])
+        n1 = (v1[0] ** 2 + v1[1] ** 2) ** 0.5
+        n2 = (v2[0] ** 2 + v2[1] ** 2) ** 0.5
+        assert dot / (n1 * n2) < 0.02, f"angle non droit au sommet {i + 1}"
+    # sans ortho : les murs restent penchés
+    room = skewed_room()
+    room["ortho"] = False
+    geo2 = layout_to_geojson(room)
+    _, ring2 = room_props(geo2)
+    v1 = [ring2[1][0] - ring2[0][0], ring2[1][1] - ring2[0][1]]
+    v2 = [ring2[2][0] - ring2[1][0], ring2[2][1] - ring2[1][1]]
+    dot = abs(v1[0] * v2[0] + v1[1] * v2[1])
+    n = ((v1[0] ** 2 + v1[1] ** 2) * (v2[0] ** 2 + v2[1] ** 2)) ** 0.5
+    assert dot / n > 0.03, "ortho=False devrait conserver l'obliquité"
+    print("✓ orthogonalisation (angles droits, aire conservée, désactivable)")
+
+
+def grid_points(x_range, y_range, z_range, n=6):
+    pts = []
+    for i in range(n):
+        for j in range(n):
+            pts.append([
+                x_range[0] + (x_range[1] - x_range[0]) * i / (n - 1),
+                y_range[0] + (y_range[1] - y_range[0]) * j / (n - 1),
+                z_range[0] + (z_range[1] - z_range[0]) * (i + j) / (2 * n - 2),
+            ])
+    return pts
+
+
+def test_openings():
+    room = rect_room()
+    room["openings_raw"] = [
+        # porte sur le mur A (z=0) : x ∈ [1.0, 1.9], sol → 2.05 m — vue 2 fois
+        {"label": "door", "score": 0.8, "img_id": 0,
+         "points": grid_points((1.0, 1.9), (0.02, 2.05), (0.0, 0.02))},
+        {"label": "door", "score": 0.6, "img_id": 1,
+         "points": grid_points((1.05, 1.92), (0.0, 2.0), (0.0, 0.02))},
+        # fenêtre sur le mur B (x=4) : z ∈ [1.0, 2.2], allège 0.9 m
+        {"label": "window", "score": 0.7, "img_id": 2,
+         "points": [[4.0, y, z] for y in (0.9, 1.5, 2.1, 2.25) for z in
+                    (1.0, 1.3, 1.6, 1.9, 2.2)]},
+        # bruit : trop loin de tout mur → ignoré
+        {"label": "window", "score": 0.9, "img_id": 3,
+         "points": grid_points((1.8, 2.4), (0.5, 1.5), (1.2, 1.6))},
+    ]
+    geo = layout_to_geojson(room)
+    props, _ = room_props(geo)
+    assert props["n_doors"] == 1 and props["n_windows"] == 1, (props["n_doors"], props["n_windows"])
+    openings = [f for f in geo["features"] if f["properties"]["kind"] == "opening"]
+    assert len(openings) == 2
+    door = next(o for o in openings if o["properties"]["opening_type"] == "door")
+    win = next(o for o in openings if o["properties"]["opening_type"] == "window")
+    close(door["properties"]["width_m"], 0.9, tol=0.15)
+    assert door["properties"]["n_views"] == 2
+    assert door["properties"]["sill_height_m"] < 0.3
+    close(win["properties"]["width_m"], 1.2, tol=0.15)
+    close(win["properties"]["sill_height_m"], 0.9, tol=0.2)
+    print("✓ ouvertures (porte fusionnée 2 vues, fenêtre avec allège, bruit ignoré)")
+
+
 if __name__ == "__main__":
     test_rect_closed()
     test_open_chain()
     test_inverted_normals()
     test_scale_factor()
     test_ccw_orientation()
+    test_orthogonalize()
+    test_openings()
     print("Tous les tests passent.")

@@ -27,6 +27,7 @@ const ctx = canvas.getContext('2d');
 
 const room = DATA.features.find(f => f.properties.kind === 'room');
 const walls = DATA.features.filter(f => f.properties.kind === 'wall');
+const openings = DATA.features.filter(f => f.properties.kind === 'opening');
 const ring = room.geometry.coordinates[0];
 const P = room.properties;
 
@@ -36,6 +37,7 @@ document.getElementById('card').innerHTML = `
   Périmètre : ${P.perimeter_m} m<br>
   Hauteur sous plafond : ${P.ceiling_height_m != null ? P.ceiling_height_m + ' m' : 'inconnue'}<br>
   Murs : ${P.n_walls}${P.closed ? '' : ' (pièce partiellement filmée)'}<br>
+  Ouvertures : ${P.n_doors ?? 0} porte(s), ${P.n_windows ?? 0} fenêtre(s)<br>
   Échelle : ${P.scale_mode ?? '?'} (×${P.scale_factor})
   ${(P.warnings || []).map(w => `<div class="warn">⚠ ${w}</div>`).join('')}
 `;
@@ -96,6 +98,46 @@ function draw() {
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillText(`${wall.properties.length_m.toFixed(2)} m${wall.properties.inferred ? ' (déduit)' : ''}`, 0, 0);
+    ctx.restore();
+  }
+
+  // ouvertures : trouée dans le mur + segment coloré (porte ocre, fenêtre bleue)
+  for (const op of openings) {
+    const [a, b] = op.geometry.coordinates;
+    const isDoor = op.properties.opening_type === 'door';
+    ctx.beginPath();
+    ctx.moveTo(tx(a), ty(a));
+    ctx.lineTo(tx(b), ty(b));
+    ctx.lineWidth = 7;
+    ctx.strokeStyle = '#f5f4f0';   // efface le mur
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(tx(a), ty(a));
+    ctx.lineTo(tx(b), ty(b));
+    ctx.lineWidth = isDoor ? 2 : 4;
+    ctx.strokeStyle = isDoor ? '#b45309' : '#2563eb';
+    if (isDoor) ctx.setLineDash([3, 3]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // étiquette côté intérieur (normale vers le centroïde)
+    const mx = (a[0] + b[0]) / 2, my = (a[1] + b[1]) / 2;
+    const dx = b[0] - a[0], dy = b[1] - a[1];
+    const len = Math.hypot(dx, dy) || 1;
+    let nx = -dy / len, ny = dx / len;
+    const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
+    if ((mx - cx) * nx + (my - cy) * ny > 0) { nx = -nx; ny = -ny; }
+    const off = 16 / scale;
+    let angle = Math.atan2(ty(b) - ty(a), tx(b) - tx(a));
+    if (angle > Math.PI / 2 || angle < -Math.PI / 2) angle += Math.PI;
+    ctx.save();
+    ctx.translate(tx([mx + nx * off, my + ny * off]), ty([mx + nx * off, my + ny * off]));
+    ctx.rotate(angle);
+    ctx.font = '11px system-ui, sans-serif';
+    ctx.fillStyle = isDoor ? '#b45309' : '#2563eb';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(`${isDoor ? 'porte' : 'fenêtre'} ${op.properties.width_m.toFixed(2)} m`, 0, 0);
     ctx.restore();
   }
 

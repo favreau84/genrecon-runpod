@@ -164,6 +164,8 @@ def handler(job):
             "perimeter_m": props["perimeter_m"],
             "ceiling_height_m": props["ceiling_height_m"],
             "n_walls": props["n_walls"],
+            "n_doors": props["n_doors"],
+            "n_windows": props["n_windows"],
             "closed": props["closed"],
             "scale_mode": props["scale_mode"],
             "scale_factor": props["scale_factor"],

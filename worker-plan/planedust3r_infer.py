@@ -86,6 +86,54 @@ def _metric_check(node_data, cam_centers, scale=1.0):
     return result
 
 
+def _detect_openings(image_list, dust3r_output, device):
+    """Détection zero-shot portes/fenêtres (OWLv2) par frame, puis extraction
+    des points 3D du pointmap DUSt3R dans chaque box. L'assignation aux murs et
+    la fusion multi-vues se font dans layout_to_geojson (rejouable en local)."""
+    from transformers import pipeline
+
+    model_name = os.environ.get("OPENINGS_MODEL", "google/owlv2-base-patch16-ensemble")
+    threshold = float(os.environ.get("OPENINGS_THRESHOLD", "0.25"))
+    detector = pipeline(
+        "zero-shot-object-detection", model=model_name,
+        device=0 if device == "cuda" else -1,
+    )
+    rng = np.random.default_rng(42)
+    out = []
+    for img_id, path in enumerate(image_list):
+        img = Image.open(path).convert("RGB")
+        W, H = img.size
+        preds = detector(img, candidate_labels=["a door", "a window"], threshold=threshold)
+        pts3d = np.asarray(dust3r_output["pts3d"][img_id])   # (h, w, 3)
+        conf = np.asarray(dust3r_output["confidence"][img_id])  # masque (h, w)
+        gh, gw = pts3d.shape[:2]
+        for p in preds:
+            box = p["box"]
+            x0 = max(int(box["xmin"] / W * gw), 0)
+            x1 = min(int(np.ceil(box["xmax"] / W * gw)), gw)
+            y0 = max(int(box["ymin"] / H * gh), 0)
+            y1 = min(int(np.ceil(box["ymax"] / H * gh)), gh)
+            if x1 - x0 < 2 or y1 - y0 < 2:
+                continue
+            patch = pts3d[y0:y1, x0:x1].reshape(-1, 3)
+            mask = conf[y0:y1, x0:x1].reshape(-1).astype(bool)
+            pts = patch[mask] if mask.any() else patch
+            pts = pts[np.isfinite(pts).all(axis=1)]
+            if len(pts) < 8:
+                continue
+            if len(pts) > 200:
+                pts = pts[rng.choice(len(pts), 200, replace=False)]
+            out.append({
+                "label": "door" if "door" in p["label"] else "window",
+                "score": round(float(p["score"]), 3),
+                "img_id": img_id,
+                "points": np.round(pts, 4).tolist(),
+            })
+    print(f"[infer] ouvertures : {len(out)} détection(s) brute(s) sur {len(image_list)} frames",
+          flush=True)
+    return out
+
+
 def _umeyama_scale(image_list, dust3r_centers, device):
     """Facteur d'échelle entre les centres caméra DUSt3R et ceux du MASt3R
     métrique (mêmes images, même ordre) : ratio des dispersions RMS autour du
@@ -140,6 +188,7 @@ def main():
                     default=os.environ.get("NONCUBOID_CKPT",
                                            "/runpod-volume/planedust3r/Structured3D_pretrained.pt"))
     ap.add_argument("--threshold", type=float, nargs=4, default=[0.35, 0.25, 0.25, 0.3])
+    ap.add_argument("--detect_openings", action=argparse.BooleanOptionalAction, default=True)
     ap.add_argument("--device", default="cuda")
     args = ap.parse_args()
 
@@ -182,6 +231,13 @@ def main():
     print(f"[infer] fusion : {n_walls} murs, sol={bool(node_data['floor_pparam'])}, "
           f"plafond={bool(node_data['ceiling_pparam'])}", flush=True)
 
+    openings_raw = []
+    if args.detect_openings:
+        try:
+            openings_raw = _detect_openings(image_list, dust3r_output, args.device)
+        except Exception as e:  # les ouvertures sont un bonus, pas un bloqueur
+            print(f"[infer] détection d'ouvertures échouée : {e}", flush=True)
+
     cam_centers = np.asarray(dust3r_output["poses"])[:, :3, 3].tolist()
 
     scale_factor = 1.0
@@ -201,6 +257,7 @@ def main():
 
     raw = dict(node_data)
     raw.update({
+        "openings_raw": openings_raw,
         "cam_centers": cam_centers,
         "image_names": [Path(p).name for p in image_list],
         "scale_mode": scale_mode_out,
