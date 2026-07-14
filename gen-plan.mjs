@@ -4,14 +4,14 @@
 // → plan.geojson (polygone métrique) + plan.html (viewer canvas autonome).
 
 import { createClient } from '@supabase/supabase-js';
-import { readFile, writeFile, stat } from 'node:fs/promises';
+import { readFile, writeFile, stat, readdir } from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
 import { pathToFileURL } from 'node:url';
 import {
   INPUT_BUCKET, OUTPUT_BUCKET, VIDEO_EXTS,
   loadEnv, need, makeJobId, resolveInputDir, extractFrames, listImages,
-  uploadImages, runAndPoll, downloadOutput,
+  resizeImages, uploadImages, runAndPoll, downloadOutput,
 } from './lib/common.mjs';
 
 // Plane-DUSt3R apparie toutes les images entre elles (O(N²)) : on reste sparse.
@@ -20,15 +20,21 @@ const FRAME_WIDTH = parseInt(process.env.PLAN_FRAME_WIDTH || '1280', 10);
 const HARD_CAP = 15;
 
 async function main() {
-  const arg = process.argv[2];
+  const args = process.argv.slice(2);
+  const wallsMode = args.includes('--walls');
+  const arg = args.filter((a) => a !== '--walls')[0];
   if (!arg) {
     console.error('Usage: node gen-plan.mjs <dossier-ou-video>');
+    console.error('       node gen-plan.mjs --walls <dossier-photos>');
     console.error('  <dossier>/input/  → vidéo (.mp4/.mov/.m4v) ou photos d\'UNE pièce');
     console.error('  (ou directement un fichier vidéo, ou un dossier plat de photos)');
-    console.error('  Sorties : plan.geojson + plan.html à la racine du dossier.');
+    console.error('  --walls : photos des murs prises DANS L\'ORDRE (sens horaire),');
+    console.error('            triées par nom → room.geojson + rapport + rendu debug.');
+    console.error('  Sorties : plan.geojson (ou room.geojson) + plan.html dans le dossier.');
     process.exit(1);
   }
   await loadEnv();
+  if (wallsMode) return mainWalls(arg);
 
   // Entrée : fichier vidéo direct, ou dossier (convention <dir>/input/)
   let photoDir, outDir;
@@ -123,6 +129,88 @@ async function main() {
   );
   if (p.warnings?.length) console.log(`⚠ ${p.warnings.join(' | ')}`);
   console.log(`→ ouvrir ${htmlPath}`);
+}
+
+// Mode walls : photos ordonnées des murs → MASt3R-SfM → room.geojson
+async function mainWalls(dir) {
+  const st = await stat(dir).catch(() => null);
+  if (!st?.isDirectory()) {
+    console.error(`--walls attend un dossier de photos : ${dir}`);
+    process.exit(1);
+  }
+  const { photoDir } = await resolveInputDir(dir);
+  const outDir = path.resolve(dir);
+
+  const entries = await listImages(photoDir);
+  const all = await readdir(photoDir);
+  if (all.some((f) => VIDEO_EXTS.has(path.extname(f).toLowerCase()))) {
+    console.error('--walls : dossier de PHOTOS attendu (vidéo trouvée — utiliser le mode normal)');
+    process.exit(1);
+  }
+  if (entries.length < 3 || entries.length > 20) {
+    console.error(`--walls : 3 à 20 photos attendues (trouvé : ${entries.length})`);
+    process.exit(1);
+  }
+
+  const supabase = createClient(need('SUPABASE_URL'), need('SUPABASE_SECRET_KEY'));
+  const endpointId = need('RUNPOD_PLAN_ENDPOINT_ID');
+  const runpodKey = need('RUNPOD_API_KEY');
+
+  console.log(`${entries.length} photos (ordre horaire = ordre des noms) — redimensionnement`);
+  const resizedDir = await resizeImages(photoDir, entries, 1536);
+  const files = await listImages(resizedDir);
+
+  const jobId = makeJobId();
+  const prefix = `jobs/${jobId}`;
+  console.log(`Job ${jobId} — upload de ${files.length} photos vers ${INPUT_BUCKET}/${prefix} …`);
+  await uploadImages(supabase, INPUT_BUCKET, prefix, resizedDir, files);
+
+  const outputKey = `${prefix}/room.geojson`;
+  const output = await runAndPoll({
+    endpointId,
+    apiKey: runpodKey,
+    input: {
+      mode: 'walls',
+      prefix,
+      input_bucket: INPUT_BUCKET,
+      output_bucket: OUTPUT_BUCKET,
+      output_key: outputKey,
+    },
+    etaHint: 'cold start + SfM : ~4-8 min',
+  });
+  console.log('Worker :', JSON.stringify(output));
+
+  console.log(`Téléchargement de ${OUTPUT_BUCKET}/${outputKey} …`);
+  const geoBuf = await downloadOutput(supabase, OUTPUT_BUCKET, outputKey);
+  const geojson = JSON.parse(geoBuf.toString('utf8'));
+
+  // diagnostics : best-effort, précieux même quand le polygone est bon
+  for (const extra of ['plan_raw.json', 'walls_report.json', 'plan_debug.png']) {
+    try {
+      const buf = await downloadOutput(supabase, OUTPUT_BUCKET, `${prefix}/${extra}`);
+      await writeFile(path.join(outDir, extra), buf);
+    } catch {
+      console.log(`(${extra} indisponible)`);
+    }
+  }
+
+  const room = geojson.features?.find((f) => f.properties?.kind === 'room');
+  const ring = room?.geometry?.coordinates?.[0];
+  if (!room || !ring || ring.length < 4) throw new Error('GeoJSON sans polygone de pièce valide');
+  if (!(room.properties.area_m2 > 0.5)) throw new Error(`aire invalide : ${room.properties.area_m2} m²`);
+
+  const geoPath = path.join(outDir, 'room.geojson');
+  await writeFile(geoPath, JSON.stringify(geojson, null, 2));
+  await writeFile(path.join(outDir, 'plan.html'), await renderViewer(geojson));
+
+  const p = room.properties;
+  console.log(
+    `✅ ${geoPath} — ${p.n_walls} murs, ${p.area_m2} m², h. plafond ${p.ceiling_height_m ?? '?'} m ` +
+    `(échelle : ${p.scale_mode}${p.closed ? '' : ', polygone non fermé'})`
+  );
+  if (p.warnings?.length) console.log(`⚠ ${p.warnings.join(' | ')}`);
+  if (output.weak_pairs?.length) console.log(`⚠ paires faibles (coins à reprendre ?) : ${output.weak_pairs.join(', ')}`);
+  console.log(`→ ouvrir ${path.join(outDir, 'plan.html')} et ${path.join(outDir, 'plan_debug.png')}`);
 }
 
 export async function renderViewer(geojson) {

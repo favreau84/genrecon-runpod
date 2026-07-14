@@ -38,7 +38,8 @@ PLANEDUST3R = Path(os.environ.get("PLANEDUST3R_DIR", "/opt/planedust3r"))
 WORKER = Path(__file__).parent
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
-MAX_IMAGES = 16  # scene_graph='complete' : O(N²) paires à 512px
+MAX_IMAGES = 16        # mode plan : scene_graph='complete', O(N²) paires à 512px
+MAX_IMAGES_WALLS = 20  # mode walls : graphe séquentiel, O(N) paires
 
 
 def _sb():
@@ -90,7 +91,7 @@ def _download_images(sb, bucket, prefix, dest: Path):
     return len(names)
 
 
-def _upload_json(sb, bucket, key, path: Path, content_type):
+def _upload_file(sb, bucket, key, path: Path, content_type):
     sb.storage.from_(bucket).upload(
         key, path.read_bytes(), {"content-type": content_type, "upsert": "true"}
     )
@@ -102,41 +103,62 @@ def handler(job):
     prefix = inp["prefix"].strip("/")
     input_bucket = inp.get("input_bucket", "recon-input")
     output_bucket = inp.get("output_bucket", "recon-output")
-    output_key = inp.get("output_key", f"{prefix}/plan.geojson")
+    mode = str(inp.get("mode", "plan")).lower()
+    default_out = f"{prefix}/room.geojson" if mode == "walls" else f"{prefix}/plan.geojson"
+    output_key = inp.get("output_key", default_out)
     scale_mode = str(inp.get("scale_mode", "auto")).lower()
     job_id = prefix.rsplit("/", 1)[-1]
 
-    for ckpt in ("checkpoint-best-onlyencoder.pth", "Structured3D_pretrained.pt"):
-        if not (VOLUME / "planedust3r" / ckpt).exists():
-            return {"error": f"Checkpoint manquant sur le volume : planedust3r/{ckpt}"}
+    if mode not in ("plan", "walls"):
+        return {"error": f"mode inconnu : {mode} (attendu : plan | walls)"}
+    if mode == "plan":
+        # le mode walls n'utilise que le MASt3R métrique (cache HF du volume)
+        for ckpt in ("checkpoint-best-onlyencoder.pth", "Structured3D_pretrained.pt"):
+            if not (VOLUME / "planedust3r" / ckpt).exists():
+                return {"error": f"Checkpoint manquant sur le volume : planedust3r/{ckpt}"}
 
     scene = Path("/tmp/plan_scene")
     shutil.rmtree(scene, ignore_errors=True)
     plan_raw = scene / "plan_raw.json"
     plan_geojson = scene / "plan.geojson"
+    walls_report = scene / "walls_report.json"
+    plan_debug = scene / "plan_debug.png"
     timings = {}
 
     try:
+        max_images = MAX_IMAGES_WALLS if mode == "walls" else MAX_IMAGES
         n_images = _download_images(_sb(), input_bucket, prefix, scene / "images")
-        if n_images > MAX_IMAGES:
+        if n_images > max_images:
             raise RuntimeError(
-                f"{n_images} images > {MAX_IMAGES} (Plane-DUSt3R apparie tout : O(N²)) — "
-                "réduire l'échantillonnage côté CLI"
+                f"{n_images} images > {max_images} (mode {mode}) — réduire côté CLI"
             )
 
-        # 1. Inférence Plane-DUSt3R (headless) -> plan_raw.json
-        timings["infer_s"] = _run(
-            [
-                sys.executable, WORKER / "planedust3r_infer.py",
-                "--image_dir", scene / "images",
-                "--out_json", plan_raw,
-                "--scale_mode", scale_mode,
-            ],
-            cwd=PLANEDUST3R,
-            log_name="planedust3r",
-        )
+        # 1. Inférence -> plan_raw.json (schéma commun aux deux modes)
+        if mode == "walls":
+            timings["infer_s"] = _run(
+                [
+                    sys.executable, WORKER / "mast3r_walls_infer.py",
+                    "--image_dir", scene / "images",
+                    "--out_json", plan_raw,
+                    "--out_report", walls_report,
+                    "--out_debug", plan_debug,
+                ],
+                cwd=WORKER,
+                log_name="walls",
+            )
+        else:
+            timings["infer_s"] = _run(
+                [
+                    sys.executable, WORKER / "planedust3r_infer.py",
+                    "--image_dir", scene / "images",
+                    "--out_json", plan_raw,
+                    "--scale_mode", scale_mode,
+                ],
+                cwd=PLANEDUST3R,
+                log_name="planedust3r",
+            )
 
-        # 2. Post-traitement géométrique -> plan.geojson
+        # 2. Post-traitement géométrique -> GeoJSON
         timings["layout_s"] = _run(
             [
                 sys.executable, WORKER / "layout_to_geojson.py",
@@ -149,14 +171,26 @@ def handler(job):
         )
 
         # 3. Upload : le GeoJSON + le raw (debug local sans re-run GPU)
+        #    + rapport et rendu debug en mode walls
+        import json
         sb = _sb()
         raw_key = f"{prefix}/plan_raw.json"
-        _upload_json(sb, output_bucket, raw_key, plan_raw, "application/json")
-        _upload_json(sb, output_bucket, output_key, plan_geojson, "application/geo+json")
+        _upload_file(sb, output_bucket, raw_key, plan_raw, "application/json")
+        extra = {}
+        if mode == "walls":
+            extra["report_key"] = f"{prefix}/walls_report.json"
+            _upload_file(sb, output_bucket, extra["report_key"], walls_report, "application/json")
+            if plan_debug.exists():
+                extra["debug_key"] = f"{prefix}/plan_debug.png"
+                _upload_file(sb, output_bucket, extra["debug_key"], plan_debug, "image/png")
+            report = json.loads(walls_report.read_text())
+            extra["weak_pairs"] = report.get("weak_pairs", [])
+            extra["n_wall_clusters"] = len(report.get("clusters", []))
+        _upload_file(sb, output_bucket, output_key, plan_geojson, "application/geo+json")
 
-        import json
         props = json.loads(plan_geojson.read_text())["features"][0]["properties"]
         return {
+            "mode": mode,
             "output_bucket": output_bucket,
             "output_key": output_key,
             "raw_key": raw_key,
@@ -172,15 +206,22 @@ def handler(job):
             "warnings": props["warnings"],
             "n_images": n_images,
             "timings": {k: round(v) for k, v in timings.items()},
+            **extra,
         }
     except Exception as e:
         traceback.print_exc()
-        # même en échec, tenter de remonter plan_raw.json pour le debug local
-        try:
-            if plan_raw.exists():
-                _upload_json(_sb(), output_bucket, f"{prefix}/plan_raw.json", plan_raw, "application/json")
-        except Exception:
-            pass
+        # même en échec, remonter raw/rapport/debug : c'est le diagnostic
+        # le plus précieux d'un run GPU raté
+        for path, key, ctype in (
+            (plan_raw, f"{prefix}/plan_raw.json", "application/json"),
+            (walls_report, f"{prefix}/walls_report.json", "application/json"),
+            (plan_debug, f"{prefix}/plan_debug.png", "image/png"),
+        ):
+            try:
+                if path.exists():
+                    _upload_file(_sb(), output_bucket, key, path, ctype)
+            except Exception:
+                pass
         return {"error": str(e), "timings": {k: round(v) for k, v in timings.items()}}
     finally:
         shutil.rmtree(scene, ignore_errors=True)

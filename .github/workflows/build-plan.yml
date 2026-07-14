@@ -56,6 +56,13 @@ jobs:
           from mast3r.model import AsymmetricMASt3R
           from mast3r.cloud_opt.sparse_ga import sparse_global_alignment
           import layout_to_geojson, planedust3r_infer
+          import walls_geometry, mast3r_walls_infer
           import runpod, supabase
           print('smoke test imports : OK')
           EOF
+
+      # Les tests géométriques du mode walls tournent dans l'image (sans GPU)
+      - name: Tests géométrie walls (sans GPU)
+        run: |
+          docker run --rm -w /opt/worker ghcr.io/${{ github.repository_owner }}/planedust3r-worker:latest \
+            python /opt/worker/test_walls_geometry.py
