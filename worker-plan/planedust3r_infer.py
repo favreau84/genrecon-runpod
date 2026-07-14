@@ -152,8 +152,12 @@ def main():
     )
     if len(image_list) < 2:
         raise ValueError(f"Pas assez d'images dans {args.image_dir} ({len(image_list)})")
-    image_size = Image.open(image_list[0]).size  # (W, H) — plane_merge en a besoin
-    print(f"[infer] {len(image_list)} images {image_size[0]}x{image_size[1]}", flush=True)
+    src_size = Image.open(image_list[0]).size
+    # Dust3rDataset (NonCuboid) redimensionne TOUTE image en 1280x720 : les
+    # détections vivent dans cet espace, pas dans celui de l'image d'origine.
+    image_size = (1280, 720)
+    print(f"[infer] {len(image_list)} images {src_size[0]}x{src_size[1]} "
+          f"(détections en {image_size[0]}x{image_size[1]})", flush=True)
 
     dust3r_model, noncuboid_model, cfg = _load_models(
         args.dust3r_ckpt, args.noncuboid_ckpt, args.device
