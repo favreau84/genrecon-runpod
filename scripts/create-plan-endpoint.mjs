@@ -37,6 +37,7 @@ async function main() {
     template = await api('POST', '/templates', {
       name: TEMPLATE_NAME,
       imageName: IMAGE,
+      isServerless: true,
       containerDiskInGb: 25,
       env: {
         SUPABASE_URL: need('SUPABASE_URL'),
