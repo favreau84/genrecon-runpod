@@ -157,10 +157,13 @@ def _orthogonalize(chain, lines, origin, e1, e2, lengths, warnings):
             continue
         theta = math.radians(a - delta)
         n_new = np.array([math.cos(theta), math.sin(theta)])
-        # la droite redressée passe par le milieu du mur
+        # rotation SUR PLACE : ancre = pied, sur la droite d'origine, du milieu
+        # du mur (les endpoints ne sont pas exactement sur le plan moyenné —
+        # écarts jusqu'à ~0,9 m observés — donc jamais d'ancrage direct dessus)
         ends = [wall.get("left_endpoint"), wall.get("right_endpoint")]
         pts = [_project(p, origin, e1, e2) for p in ends if p is not None]
-        anchor = np.mean(pts, axis=0) if pts else -line[1] * line[0]
+        mid = np.mean(pts, axis=0) if pts else np.zeros(2)
+        anchor = mid - (float(np.dot(line[0], mid)) + line[1]) * line[0]
         out.append((n_new, -float(np.dot(n_new, anchor))))
         if abs(delta) > 0.5:
             snapped += 1
