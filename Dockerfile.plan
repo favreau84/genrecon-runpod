@@ -13,15 +13,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Dépendances d'inférence (pas de `pip install -r` : le requirements de
-# MASt3R réinstallerait torch cu118). mmcv 1.2.1 "lite" (pur Python) requis
-# par NonCuboidRoom/noncuboid/models/hrnet.py (mmcv.cnn, mmcv.runner).
+# MASt3R réinstallerait torch cu118). mmcv absent volontairement : le pin
+# upstream (1.2.1) ne compile pas sur Python 3.11 — remplacé par le stub
+# worker-plan/vendor/mmcv (hrnet.py n'utilise que 3 fonctions d'init).
 RUN pip install \
     numpy==1.26.4 \
     scipy shapely easydict opencv-python-headless pillow pyyaml tqdm \
     einops roma safetensors trimesh matplotlib numba open3d \
     scikit-learn tensorboardX \
     "huggingface_hub[cli]" hf_transfer \
-    mmcv==1.2.1 \
     runpod supabase
 
 # Plane-DUSt3R (commit épinglé) — vendore les forks MASt3R/dust3r et
@@ -33,8 +33,10 @@ RUN git clone https://github.com/justacar/Plane-DUSt3R.git /opt/planedust3r \
 
 COPY worker-plan/ /opt/worker/
 
-# sys.path complété par planedust3r_infer.py (repo racine + MASt3R + dust3r)
+# sys.path complété par planedust3r_infer.py (repo racine + MASt3R + dust3r) ;
+# vendor/ fournit le stub mmcv
 ENV PLANEDUST3R_DIR=/opt/planedust3r \
+    PYTHONPATH=/opt/worker/vendor \
     HF_HUB_ENABLE_HF_TRANSFER=1 \
     MPLBACKEND=Agg
 

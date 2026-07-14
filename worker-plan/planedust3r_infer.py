@@ -28,6 +28,7 @@ os.environ.setdefault("MPLBACKEND", "Agg")  # plane_merge importe matplotlib
 REPO = Path(os.environ.get("PLANEDUST3R_DIR", "/opt/planedust3r"))
 sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(REPO / "MASt3R"))  # mast3r + (via path_to_dust3r) dust3r
+sys.path.append(str(Path(__file__).parent / "vendor"))  # stub mmcv pour hrnet
 
 import numpy as np  # noqa: E402
 import torch  # noqa: E402
