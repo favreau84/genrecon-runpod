@@ -1,0 +1,61 @@
+name: build-plan-worker
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - Dockerfile.plan
+      - worker-plan/**
+      - .github/workflows/build-plan.yml
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Login GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.plan
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/planedust3r-worker:latest
+            ghcr.io/${{ github.repository_owner }}/planedust3r-worker:${{ github.sha }}
+          cache-from: type=gha,scope=plan
+          cache-to: type=gha,mode=max,scope=plan
+
+      # Le point de contrôle le moins cher du projet : tout le graphe d'imports
+      # (mmcv, open3d, dust3r, noncuboid, sparse_ga…) vérifié sans GPU ni crédit.
+      - name: Smoke test (imports, sans GPU)
+        run: |
+          docker run --rm -i ghcr.io/${{ github.repository_owner }}/planedust3r-worker:latest \
+            python - <<'EOF'
+          import sys
+          sys.path[:0] = ['/opt/planedust3r', '/opt/planedust3r/MASt3R', '/opt/worker']
+          from MASt3R.dust3r_extract import dust3r_extract
+          from dust3r.model import AsymmetricCroCo3DStereo
+          from NonCuboidRoom.plane_detection import extract_plane
+          from NonCuboidRoom.noncuboid.models import Detector
+          import plane_merge_planedust3r
+          from mast3r.model import AsymmetricMASt3R
+          from mast3r.cloud_opt.sparse_ga import sparse_global_alignment
+          import layout_to_geojson, planedust3r_infer
+          import runpod, supabase
+          print('smoke test imports : OK')
+          EOF

@@ -1,0 +1,42 @@
+# Worker RunPod Serverless : Plane-DUSt3R (plan 2D de pièce -> GeoJSON)
+# Image légère : pas d'extension CUDA à compiler (base runtime, curope sacrifié
+# -> fallback pytorch pur, négligeable sur ~12 images).
+# Base 2.4.1 et pas 2.6 : torch>=2.6 passe torch.load à weights_only=True par
+# défaut, ce qui casse le chargement des checkpoints picklés DUSt3R/NonCuboid.
+FROM pytorch/pytorch:2.4.1-cuda12.4-cudnn9-runtime
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PIP_NO_CACHE_DIR=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git libgl1 libglib2.0-0 libgomp1 libx11-6 libegl1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Dépendances d'inférence (pas de `pip install -r` : le requirements de
+# MASt3R réinstallerait torch cu118). mmcv 1.2.1 "lite" (pur Python) requis
+# par NonCuboidRoom/noncuboid/models/hrnet.py (mmcv.cnn, mmcv.runner).
+RUN pip install \
+    numpy==1.26.4 \
+    scipy shapely easydict opencv-python-headless pillow pyyaml tqdm \
+    einops roma safetensors trimesh matplotlib numba open3d \
+    scikit-learn tensorboardX \
+    "huggingface_hub[cli]" hf_transfer \
+    mmcv==1.2.1 \
+    runpod supabase
+
+# Plane-DUSt3R (commit épinglé) — vendore les forks MASt3R/dust3r et
+# NonCuboidRoom. ⚠ Code MASt3R/dust3r sous CC BY-NC-SA 4.0 : usage non
+# commercial uniquement (racine et checkpoint Plane-DUSt3R : MIT).
+RUN git clone https://github.com/justacar/Plane-DUSt3R.git /opt/planedust3r \
+    && cd /opt/planedust3r \
+    && git checkout 9a1ae50650ec6d706bf329352aaaf49efded90a0
+
+COPY worker-plan/ /opt/worker/
+
+# sys.path complété par planedust3r_infer.py (repo racine + MASt3R + dust3r)
+ENV PLANEDUST3R_DIR=/opt/planedust3r \
+    HF_HUB_ENABLE_HF_TRANSFER=1 \
+    MPLBACKEND=Agg
+
+WORKDIR /opt/planedust3r
+CMD ["python", "-u", "/opt/worker/plan_handler.py"]
