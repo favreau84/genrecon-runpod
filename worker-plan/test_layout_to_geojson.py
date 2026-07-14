@@ -196,6 +196,48 @@ def test_openings():
     print("✓ ouvertures (porte fusionnée 2 vues, fenêtre avec allège, bruit ignoré)")
 
 
+def test_opening_raycast():
+    """La box 2D d'une porte est construite par projection directe (pose et
+    focale connues) ; le lancer de rayons doit retrouver le rectangle exact,
+    même si les points 3D ne couvrent qu'une bande partielle de la porte."""
+    import numpy as np
+    room = rect_room()
+    # caméra OpenCV (x droite, y bas, z avant) face au mur A (z=0), Y monde = haut
+    C = np.array([1.45, 1.0, 3.2])
+    R = np.diag([1.0, -1.0, -1.0])  # colonnes : droite, bas, avant=(0,0,-1)
+    f, gw, gh = 300.0, 512, 288
+    W, H = 1280, 720
+    door = {"x": (1.0, 1.9), "y": (0.0, 2.05)}  # rectangle réel sur le mur z=0
+
+    def project(xw, yw):
+        pc = R.T @ (np.array([xw, yw, 0.0]) - C)
+        return gw / 2 + f * pc[0] / pc[2], gh / 2 + f * pc[1] / pc[2]
+
+    us, vs = zip(*[project(x, y) for x in door["x"] for y in door["y"]])
+    box = [min(us) * W / gw, min(vs) * H / gh, max(us) * W / gw, max(vs) * H / gh]
+
+    pose = np.eye(4)
+    pose[:3, :3] = R
+    pose[:3, 3] = C
+    room["poses"] = [pose.tolist()] * 3
+    room["focals"] = [f] * 3
+    room["dust3r_size"] = [gw, gh]
+    room["openings_raw"] = [{
+        "label": "door", "score": 0.9, "img_id": 0,
+        "box": box, "img_size": [W, H],
+        # points volontairement restreints à une bande (masque de confiance)
+        "points": grid_points((1.2, 1.7), (0.9, 1.3), (0.0, 0.02)),
+    }]
+    geo = layout_to_geojson(room)
+    props, _ = room_props(geo)
+    assert props["n_doors"] == 1, props
+    door_f = next(f for f in geo["features"] if f["properties"]["kind"] == "opening")
+    close(door_f["properties"]["width_m"], 0.9, tol=0.05)
+    assert door_f["properties"]["sill_height_m"] < 0.1
+    close(door_f["properties"]["head_height_m"], 2.05, tol=0.1)
+    print("✓ ray-cast : rectangle exact retrouvé depuis la box (bande de points partielle)")
+
+
 if __name__ == "__main__":
     test_rect_closed()
     test_open_chain()
@@ -204,4 +246,5 @@ if __name__ == "__main__":
     test_ccw_orientation()
     test_orthogonalize()
     test_openings()
+    test_opening_raycast()
     print("Tous les tests passent.")

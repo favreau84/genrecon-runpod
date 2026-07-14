@@ -134,6 +134,8 @@ def _detect_openings(image_list, dust3r_output, device):
                 "label": "door" if "door" in p["label"] else "window",
                 "score": round(float(p["score"]), 3),
                 "img_id": img_id,
+                "box": [float(box["xmin"]), float(box["ymin"]), float(box["xmax"]), float(box["ymax"])],
+                "img_size": [W, H],
                 "points": np.round(pts, 4).tolist(),
             })
     print(f"[infer] ouvertures : {len(out)} détection(s) brute(s) sur {len(image_list)} frames",
@@ -265,6 +267,11 @@ def main():
     raw = dict(node_data)
     raw.update({
         "openings_raw": openings_raw,
+        # poses/focales dust3r : nécessaires au lancer de rayons des boxes
+        # d'ouvertures sur les plans de murs (coordonnées images 512xN)
+        "poses": np.round(np.asarray(dust3r_output["poses"]), 6).tolist(),
+        "focals": np.round(np.asarray(dust3r_output["focals"]).reshape(-1), 3).tolist(),
+        "dust3r_size": list(dust3r_image_size),
         "cam_centers": cam_centers,
         "image_names": [Path(p).name for p in image_list],
         "scale_mode": scale_mode_out,

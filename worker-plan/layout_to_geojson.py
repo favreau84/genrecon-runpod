@@ -299,9 +299,57 @@ def _orthogonalize(chain, lines, origin, e1, e2, lengths, warnings):
     return out
 
 
-OPENING_WALL_DIST = 0.35   # m : distance max des points 3D au mur assigné
+OPENING_WALL_DIST = 0.5    # m : distance max des points 3D au mur assigné
 OPENING_MIN_WIDTH = 0.35   # m : en-dessous, bruit de détection
 OPENING_MERGE_GAP = 0.25   # m : intervalles plus proches fusionnés (multi-vues)
+
+
+def _raycast_opening(det, raw, scale, origin, e1, e2, up, d_floor, seg_a, seg_b):
+    """Étendue d'une ouverture par lancer de rayons : les coins de la box 2D
+    sont projetés depuis la caméra sur le plan vertical du mur assigné. Immune
+    au masque de confiance DUSt3R (les points 3D ne couvrent qu'une bande de
+    l'ouverture) et au bruit de profondeur derrière une porte ouverte.
+    Retourne (t0, t1, sill, head) le long du segment, ou None."""
+    poses, focals, dsize = raw.get("poses"), raw.get("focals"), raw.get("dust3r_size")
+    box, img_size = det.get("box"), det.get("img_size")
+    if not (poses and focals and dsize and box and img_size):
+        return None
+    img_id = det["img_id"]
+    pose = np.array(poses[img_id], float)
+    C = pose[:3, 3] * scale
+    R = pose[:3, :3]
+    f = float(focals[img_id])
+    gw, gh = dsize
+    W, H = img_size
+    cx, cy = gw / 2.0, gh / 2.0
+
+    # plan vertical du mur : normale horizontale, passe par le segment
+    u_dir = _unit(seg_b - seg_a)
+    n2 = np.array([-u_dir[1], u_dir[0]])
+    n3 = n2[0] * e1 + n2[1] * e2
+    p0 = origin + seg_a[0] * e1 + seg_a[1] * e2
+    c3 = -float(np.dot(n3, p0))
+
+    ts, hs = [], []
+    for u, v in ((box[0], box[1]), (box[2], box[1]), (box[0], box[3]), (box[2], box[3])):
+        ud, vd = u * gw / W, v * gh / H
+        dir_cam = np.array([(ud - cx) / f, (vd - cy) / f, 1.0])
+        dir_w = R @ dir_cam
+        denom = float(np.dot(n3, dir_w))
+        if abs(denom) < 1e-6:
+            continue
+        t_ray = -(float(np.dot(n3, C)) + c3) / denom
+        if t_ray <= 0:
+            continue  # mur derrière la caméra
+        P = C + t_ray * dir_w
+        p2 = np.array([np.dot(P - origin, e1), np.dot(P - origin, e2)])
+        ts.append(float(np.dot(p2 - seg_a, u_dir)))
+        hs.append(float(np.dot(P, up) + d_floor))
+    if len(ts) < 4:
+        return None
+    L = float(np.linalg.norm(seg_b - seg_a))
+    t0, t1 = max(min(ts), 0.0), min(max(ts), L)
+    return t0, t1, max(min(hs), 0.0), max(hs)
 
 
 def _opening_features(raw, scale, origin, e1, e2, up, d_floor, coords, warnings):
@@ -335,16 +383,22 @@ def _opening_features(raw, scale, origin, e1, e2, up, d_floor, coords, warnings)
         if best is None or best_d > OPENING_WALL_DIST:
             continue
         a, b = segs[best]
-        u_dir = (b - a) / np.linalg.norm(b - a)
-        t = (xy - a) @ u_dir
-        t0, t1 = float(np.percentile(t, 8)), float(np.percentile(t, 92))
-        t0, t1 = max(t0, 0.0), min(t1, float(np.linalg.norm(b - a)))
+        # étendue par lancer de rayons (box projetée sur le plan du mur) ;
+        # fallback : percentiles des points 3D (bande partielle, sous-estime)
+        cast = _raycast_opening(det, raw, scale, origin, e1, e2, up, d_floor, a, b)
+        if cast is not None:
+            t0, t1, sill, head = cast
+        else:
+            u_dir = (b - a) / np.linalg.norm(b - a)
+            t = (xy - a) @ u_dir
+            t0, t1 = float(np.percentile(t, 8)), float(np.percentile(t, 92))
+            t0, t1 = max(t0, 0.0), min(t1, float(np.linalg.norm(b - a)))
+            sill = float(np.percentile(heights, 5))
+            head = float(np.percentile(heights, 95))
         if t1 - t0 < OPENING_MIN_WIDTH:
             continue
         per_wall.setdefault((best, det["label"]), []).append({
-            "t0": t0, "t1": t1,
-            "sill": float(np.percentile(heights, 5)),
-            "head": float(np.percentile(heights, 95)),
+            "t0": t0, "t1": t1, "sill": sill, "head": head,
             "score": float(det.get("score", 0.5)),
         })
 
