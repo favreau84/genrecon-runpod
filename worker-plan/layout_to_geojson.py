@@ -352,7 +352,7 @@ def _raycast_opening(det, raw, scale, origin, e1, e2, up, d_floor, seg_a, seg_b)
     return t0, t1, max(min(hs), 0.0), max(hs)
 
 
-def _opening_features(raw, scale, origin, e1, e2, up, d_floor, coords, warnings):
+def _opening_features(raw, scale, origin, e1, e2, up, d_floor, coords, warnings, ceiling_h=None):
     """openings_raw (détections OWLv2 + points 3D du pointmap) → features GeoJSON.
     Assignation géométrique au mur FINAL le plus proche (pas d'indices à suivre à
     travers le nettoyage), intervalle le long du mur, fusion multi-vues."""
@@ -405,8 +405,7 @@ def _opening_features(raw, scale, origin, e1, e2, up, d_floor, coords, warnings)
     def rnd(x):
         return round(float(x), 3)
 
-    features = []
-    n_doors = n_windows = 0
+    all_merged = []
     for (wi, label), items in sorted(per_wall.items()):
         items.sort(key=lambda o: o["t0"])
         merged = [dict(items[0], votes=1)]
@@ -420,29 +419,55 @@ def _opening_features(raw, scale, origin, e1, e2, up, d_floor, coords, warnings)
                 m["votes"] += 1
             else:
                 merged.append(dict(o, votes=1))
-        a, b = segs[wi]
+        all_merged.extend(dict(m, wall=wi, label=label) for m in merged)
+
+    # dédoublonnage inter-labels : OWLv2 étiquette souvent le même objet porte
+    # ET fenêtre — sur un même mur, deux intervalles qui se recouvrent
+    # majoritairement sont le même objet, on garde le meilleur score
+    all_merged.sort(key=lambda m: -m["score"])
+    kept = []
+    for m in all_merged:
+        dup = False
+        for k in kept:
+            if k["wall"] != m["wall"]:
+                continue
+            overlap = min(k["t1"], m["t1"]) - max(k["t0"], m["t0"])
+            if overlap > 0.5 * min(k["t1"] - k["t0"], m["t1"] - m["t0"]):
+                k["votes"] += m["votes"]
+                dup = True
+                break
+        if not dup:
+            kept.append(m)
+
+    features = []
+    n_doors = n_windows = 0
+    for m in sorted(kept, key=lambda m: (m["wall"], m["t0"])):
+        a, b = segs[m["wall"]]
         u_dir = (b - a) / np.linalg.norm(b - a)
-        for m in merged:
-            p0, p1 = a + m["t0"] * u_dir, a + m["t1"] * u_dir
-            if label == "door":
-                n_doors += 1
-            else:
-                n_windows += 1
-            features.append({
-                "type": "Feature",
-                "geometry": {"type": "LineString",
-                             "coordinates": [[rnd(p0[0]), rnd(p0[1])], [rnd(p1[0]), rnd(p1[1])]]},
-                "properties": {
-                    "kind": "opening",
-                    "opening_type": label,
-                    "wall_index": wi,
-                    "width_m": rnd(m["t1"] - m["t0"]),
-                    "sill_height_m": rnd(max(m["sill"], 0.0)),
-                    "head_height_m": rnd(m["head"]),
-                    "confidence": rnd(m["score"]),
-                    "n_views": m["votes"],
-                },
-            })
+        p0, p1 = a + m["t0"] * u_dir, a + m["t1"] * u_dir
+        sill, head = max(m["sill"], 0.0), m["head"]
+        if ceiling_h is not None:
+            head = min(head, ceiling_h)
+        if m["label"] == "door":
+            sill = 0.0  # une porte part du sol (le bas est souvent occulté)
+            n_doors += 1
+        else:
+            n_windows += 1
+        features.append({
+            "type": "Feature",
+            "geometry": {"type": "LineString",
+                         "coordinates": [[rnd(p0[0]), rnd(p0[1])], [rnd(p1[0]), rnd(p1[1])]]},
+            "properties": {
+                "kind": "opening",
+                "opening_type": m["label"],
+                "wall_index": m["wall"],
+                "width_m": rnd(m["t1"] - m["t0"]),
+                "sill_height_m": rnd(sill),
+                "head_height_m": rnd(head),
+                "confidence": rnd(m["score"]),
+                "n_views": m["votes"],
+            },
+        })
     return features, n_doors, n_windows
 
 
@@ -594,7 +619,7 @@ def layout_to_geojson(raw, job_id=None):
 
     coords = [[rnd(v[0]), rnd(v[1])] for v in verts]
     opening_feats, n_doors, n_windows = _opening_features(
-        raw, scale, origin, e1, e2, up, d_floor, coords, warnings
+        raw, scale, origin, e1, e2, up, d_floor, coords, warnings, ceiling_h=height
     )
     features = [{
         "type": "Feature",
