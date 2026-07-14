@@ -32,7 +32,12 @@ import walls_geometry  # noqa: E402
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
 CACHE = "/tmp/mast3r_walls_cache"
-WEAK_CONF = 5.0  # aligné sur matching_conf_thr
+# Une paire est "faible" si peu de correspondances OU confiance moyenne de
+# matching basse. (PAS le conf_score des pointmaps : systématiquement ~2-5 sur
+# de l'ultra grand angle alors que le matching est excellent — calibré sur le
+# run test-chambre-2 : 1700-6000 corres/paire, conf_mean 1.9-24.6.)
+WEAK_N_CORRES = 1000
+WEAK_CONF_MEAN = 2.0
 
 
 def _build_pairs(imgs):
@@ -85,7 +90,8 @@ def _pair_scores(cache, image_list, pairs):
                  "consecutive": abs(i - j) in (1, len(image_list) - 1)}
         if score:
             entry.update(score)
-            entry["weak"] = score["conf"] <= WEAK_CONF
+            entry["weak"] = (score["n_corres"] < WEAK_N_CORRES
+                             or score["conf_mean"] < WEAK_CONF_MEAN)
         else:
             entry["weak"] = None  # score indisponible
         out.append(entry)
@@ -162,7 +168,8 @@ def main():
     report["weak_pairs"] = [f"{s['names'][0]}↔{s['names'][1]}" for s in weak_pairs]
     if weak_pairs:
         report["warnings"].append(
-            f"{len(weak_pairs)} paire(s) faible(s) (conf ≤ {WEAK_CONF}) — voir report.pairs"
+            f"{len(weak_pairs)} paire(s) faible(s) (< {WEAK_N_CORRES} corres ou "
+            f"conf_mean < {WEAK_CONF_MEAN}) — voir report.pairs"
         )
     print(f"[walls] {len(plan_raw['global_plane_info'])} murs, "
           f"metric_check={report['metric_check']['passed']}, "
