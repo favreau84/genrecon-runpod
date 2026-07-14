@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Plan de pièce</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #f5f4f0; font-family: system-ui, sans-serif; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+  #card {
+    position: fixed; top: 16px; left: 16px; background: #fff; border: 1px solid #ddd;
+    border-radius: 8px; padding: 12px 16px; font-size: 13px; line-height: 1.6;
+    box-shadow: 0 2px 8px rgba(0,0,0,.08); max-width: 280px;
+  }
+  #card h1 { font-size: 14px; margin: 0 0 6px; }
+  #card .warn { color: #b45309; font-size: 12px; margin-top: 6px; }
+</style>
+</head>
+<body>
+<div id="card"></div>
+<canvas id="c"></canvas>
+<script>
+const DATA = /*__GEOJSON__*/null;
+
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+
+const room = DATA.features.find(f => f.properties.kind === 'room');
+const walls = DATA.features.filter(f => f.properties.kind === 'wall');
+const ring = room.geometry.coordinates[0];
+const P = room.properties;
+
+document.getElementById('card').innerHTML = `
+  <h1>Plan de pièce</h1>
+  Surface : <b>${P.area_m2} m²</b><br>
+  Périmètre : ${P.perimeter_m} m<br>
+  Hauteur sous plafond : ${P.ceiling_height_m != null ? P.ceiling_height_m + ' m' : 'inconnue'}<br>
+  Murs : ${P.n_walls}${P.closed ? '' : ' (pièce partiellement filmée)'}<br>
+  Échelle : ${P.scale_mode ?? '?'} (×${P.scale_factor})
+  ${(P.warnings || []).map(w => `<div class="warn">⚠ ${w}</div>`).join('')}
+`;
+
+function draw() {
+  const dpr = window.devicePixelRatio || 1;
+  const w = window.innerWidth, h = window.innerHeight;
+  canvas.width = w * dpr; canvas.height = h * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+
+  const xs = ring.map(p => p[0]), ys = ring.map(p => p[1]);
+  const minX = Math.min(...xs), maxX = Math.max(...xs);
+  const minY = Math.min(...ys), maxY = Math.max(...ys);
+  const bw = maxX - minX || 1, bh = maxY - minY || 1;
+  const margin = 0.15;
+  const scale = Math.min(w * (1 - 2 * margin) / bw, h * (1 - 2 * margin) / bh);
+  // Y géométrique vers le haut, Y canvas vers le bas
+  const tx = p => (p[0] - (minX + maxX) / 2) * scale + w / 2;
+  const ty = p => ((minY + maxY) / 2 - p[1]) * scale + h / 2;
+
+  // polygone
+  ctx.beginPath();
+  ring.forEach((p, i) => i === 0 ? ctx.moveTo(tx(p), ty(p)) : ctx.lineTo(tx(p), ty(p)));
+  ctx.closePath();
+  ctx.fillStyle = 'rgba(96, 133, 189, 0.12)';
+  ctx.fill();
+
+  // murs + cotes
+  for (const wall of walls) {
+    const [a, b] = wall.geometry.coordinates;
+    ctx.beginPath();
+    ctx.moveTo(tx(a), ty(a));
+    ctx.lineTo(tx(b), ty(b));
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = '#2d3748';
+    ctx.setLineDash(wall.properties.inferred ? [8, 6] : []);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // cote au milieu du mur, décalée vers l'extérieur (normale opposée au centroïde)
+    const mx = (a[0] + b[0]) / 2, my = (a[1] + b[1]) / 2;
+    const dx = b[0] - a[0], dy = b[1] - a[1];
+    const len = Math.hypot(dx, dy) || 1;
+    let nx = -dy / len, ny = dx / len;
+    const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
+    if ((mx - cx) * nx + (my - cy) * ny < 0) { nx = -nx; ny = -ny; }
+    const off = 18 / scale;
+    const lx = tx([mx + nx * off, my + ny * off]);
+    const ly = ty([mx + nx * off, my + ny * off]);
+    let angle = Math.atan2(ty(b) - ty(a), tx(b) - tx(a));
+    if (angle > Math.PI / 2 || angle < -Math.PI / 2) angle += Math.PI; // texte lisible
+    ctx.save();
+    ctx.translate(lx, ly);
+    ctx.rotate(angle);
+    ctx.font = '12px system-ui, sans-serif';
+    ctx.fillStyle = wall.properties.inferred ? '#b45309' : '#1a202c';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(`${wall.properties.length_m.toFixed(2)} m${wall.properties.inferred ? ' (déduit)' : ''}`, 0, 0);
+    ctx.restore();
+  }
+
+  // sommets
+  ctx.fillStyle = '#2d3748';
+  for (const p of ring.slice(0, -1)) {
+    ctx.beginPath();
+    ctx.arc(tx(p), ty(p), 3.5, 0, 2 * Math.PI);
+    ctx.fill();
+  }
+
+  // barre d'échelle 1 m
+  const bx = 20, by = h - 30;
+  ctx.strokeStyle = '#1a202c';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(bx, by); ctx.lineTo(bx + scale, by);
+  ctx.moveTo(bx, by - 5); ctx.lineTo(bx, by + 5);
+  ctx.moveTo(bx + scale, by - 5); ctx.lineTo(bx + scale, by + 5);
+  ctx.stroke();
+  ctx.font = '12px system-ui, sans-serif';
+  ctx.fillStyle = '#1a202c';
+  ctx.textAlign = 'left';
+  ctx.fillText('1 m', bx + scale + 8, by + 4);
+}
+
+window.addEventListener('resize', draw);
+draw();
+</script>
+</body>
+</html>
