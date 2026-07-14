@@ -10,8 +10,9 @@ const TEMPLATE_NAME = 'planedust3r-worker';
 const ENDPOINT_NAME = 'planedust3r-plan';
 const IMAGE = 'ghcr.io/favreau84/planedust3r-worker:latest';
 const NETWORK_VOLUME_ID = 'rzh0jzujtx'; // genrecon-weights (EU-RO-1)
-// A40 d'abord : 48 Go comme la L40S mais ~2× moins cher (0,44 $/h secure)
-const GPU_TYPE_IDS = ['NVIDIA A40', 'NVIDIA L40S'];
+// Le volume impose EU-RO-1, où seuls les A100 80 Go ont du stock (vérifié le
+// 14.07.2026 : A40/L40S/A5000/A6000 indisponibles dans ce datacenter).
+const GPU_TYPE_IDS = ['NVIDIA A100 80GB PCIe', 'NVIDIA A100-SXM4-80GB'];
 
 async function api(method, path, body) {
   const res = await fetch(`${API}${path}`, {
