@@ -68,7 +68,8 @@ async function main() {
   // mode Iphone — beaucoup de vues très recouvrantes). Cap à MAX_FRAMES pour
   // rester dans la mémoire de VGGT.
   const VIDEO_EXTS = new Set(['.mp4', '.mov', '.m4v']);
-  const MAX_FRAMES = 64;
+  const MAX_FRAMES = parseInt(process.env.MAX_FRAMES || '64', 10);
+  const FRAME_WIDTH = parseInt(process.env.FRAME_WIDTH || '1920', 10);
   const entries = await readdir(photoDir);
   const videos = entries.filter((f) => VIDEO_EXTS.has(path.extname(f).toLowerCase()));
   let framesDir = null;
@@ -87,7 +88,7 @@ async function main() {
       console.log(`Vidéo ${v} (${dur.toFixed(0)}s) → extraction à ${fps.toFixed(2)} img/s …`);
       execFileSync('ffmpeg', [
         '-loglevel', 'error', '-i', src,
-        '-vf', `fps=${fps},scale='min(1440,iw)':-2`,
+        '-vf', `fps=${fps},scale='min(${FRAME_WIDTH},iw)':-2`,
         '-q:v', '2', path.join(framesDir, `v${vi}_%04d.jpg`),
       ]);
     }
